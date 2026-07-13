@@ -1,0 +1,21 @@
+[package]
+name = "crustagent-format"
+description = "Parsers for Microsoft Agent character files (.acs, .acf, .acd)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# Intentionally dependency-free for now: the format layer is pure byte-wrangling and
+# should stay trivially portable and fuzzable. Add `thiserror` etc. only if it earns its keep.
+[dependencies]
+
+[[example]]
+name = "dump"
+path = "examples/dump.rs"
+
+[[example]]
+name = "render"
+path = "examples/render.rs"

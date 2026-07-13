@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/crustagent-format", "crates/crustagent-core", "crates/crustagent-gif"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/"
+authors = ["crustagent contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

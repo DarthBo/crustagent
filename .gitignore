@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+
+# Character assets are third-party (Microsoft / original authors). We don't have
+# redistribution rights, so keep them out of the repo. Drop your own .acs/.acf files
+# into assets/agents/ locally to run the examples and real-file tests.
+/assets/agents/

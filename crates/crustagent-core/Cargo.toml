@@ -1,0 +1,15 @@
+[package]
+name = "crustagent-core"
+description = "Portable animation runtime for Microsoft Agent characters: sequencing, branching, timing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crustagent-format = { path = "../crustagent-format" }
+
+[dev-dependencies]
+crustagent-gif = { path = "../crustagent-gif" }

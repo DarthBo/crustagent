@@ -1,0 +1,62 @@
+crustagent
+Copyright (C) 2025-2026 Tibault Damman and the crustagent authors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+================================================================================
+Derivation and attribution
+================================================================================
+
+crustagent is a from-scratch Rust implementation of the classic Microsoft Agent
+character system. Its file-format parsing and playback behavior were
+reverse-engineered from — and, for several algorithms, ported from — the source
+of:
+
+  DoubleAgent
+  Copyright (C) Cinnamon Software Inc.
+  https://sourceforge.net/projects/doubleagent/
+  Licensed GPL / LGPL.
+
+As a work derived from DoubleAgent, crustagent is distributed under the GNU
+General Public License, version 3 or later. Portions of the following modules in
+particular follow DoubleAgent's implementation closely and are best understood as
+ports of it (see the source comments, which cite the corresponding DoubleAgent
+functions and line ranges):
+
+  - crustagent-format: the ACS 2.0 / ACS 1.5 readers, the LZ77 image
+    decompressor (CAgentFileBinary::DecodeData), and the frame compositor
+    (CAgentFile::GetFrameBits).
+  - crustagent-core: the animation sequence builder
+    (CAgentStreamInfo::SequenceAnimationFrames) and the speech-markup parser
+    (CAgentTextParse).
+
+Other parts — the embedding API and action queue (crustagent), the windowed
+renderer (crustagent-render), the text-to-speech and audio integration
+(crustagent-tts, crustagent-audio), and the GIF encoder (crustagent-gif) — are
+original to this project.
+
+================================================================================
+Microsoft Agent
+================================================================================
+
+The ".acs" character file format and the Microsoft Agent characters (Clippit,
+Merlin, Genie, Peedy, Robby, etc.) and their artwork are the property of
+Microsoft Corporation and the respective character authors. "Microsoft" and
+"Microsoft Agent" are trademarks of Microsoft Corporation. This project is not
+affiliated with, endorsed by, or sponsored by Microsoft.
+
+No Microsoft Agent character assets (.acs / .acf / .aca / .acd files or their
+artwork or sounds) are included in this repository. Character files are supplied
+by the user at runtime.
+
+================================================================================
+Third-party dependencies
+================================================================================
+
+crustagent depends on several third-party Rust crates, each distributed under
+its own license (predominantly MIT and/or Apache-2.0), including: winit, wgpu,
+pollster, rodio, tts, fontdue, fontdb, cfb, and font8x8. Their license terms
+apply to those components; consult each crate for details.

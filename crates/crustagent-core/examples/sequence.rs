@@ -1,0 +1,59 @@
+//! Flatten a named animation into its timed playback sequence and print the timeline.
+//!
+//! Usage: `cargo run -p crustagent-core --example sequence -- <file.acs> <Animation> [seed]`
+
+use crustagent_core::{sequence_animation, SplitMix64};
+use crustagent_format::AcsFile;
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let (path, anim_name) = match (args.next(), args.next()) {
+        (Some(p), Some(a)) => (p, a),
+        _ => {
+            eprintln!("usage: sequence <file.acs> <Animation> [seed]");
+            std::process::exit(2);
+        }
+    };
+    let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let chr = AcsFile::open(&path).unwrap_or_else(|e| {
+        eprintln!("parse {path}: {e}");
+        std::process::exit(1);
+    });
+    let anim = chr.animation(&anim_name).unwrap_or_else(|| {
+        eprintln!("no animation {anim_name:?}");
+        std::process::exit(1);
+    });
+
+    let mut rng = SplitMix64::new(seed);
+    let seq = sequence_animation(anim, &mut rng);
+
+    println!(
+        "return: {:?}{}",
+        anim.return_kind,
+        if anim.return_name.is_empty() {
+            String::new()
+        } else {
+            format!(" -> {:?}", anim.return_name)
+        }
+    );
+    println!(
+        "{anim_name}: {} source frame(s) -> {} timeline entr(y/ies), {} ms{}{}",
+        anim.frames.len(),
+        seq.len(),
+        seq.total_ms(),
+        match seq.loop_start_cs {
+            Some(cs) => format!(", loops from {} ms", cs * 10),
+            None => ", play-once".to_string(),
+        },
+        if seq.truncated { " (TRUNCATED)" } else { "" }
+    );
+    for e in &seq.frames {
+        println!(
+            "  t={:>5}ms  frame {:>3}  {:>4}ms",
+            e.start_cs * 10,
+            e.frame,
+            e.duration_cs as u32 * 10
+        );
+    }
+}
