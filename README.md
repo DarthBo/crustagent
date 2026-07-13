@@ -26,10 +26,11 @@ crates/
   crustagent-format/   # pure, dependency-free parsers for the character file formats
   crustagent-core/     # portable animation runtime (sequencing, branching, timing, text)
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
+  crustagent-render/   # windowed viewer (winit + softbuffer) that plays a character
 ```
 
-Planned crates: the rest of `crustagent-core` (action queue + state machine + idle/move),
-`crustagent-render` (per-pixel-alpha surface), and audio/TTS/host layers as needed.
+Planned: the rest of `crustagent-core` (action queue + state machine + idle/move), a true
+transparent desktop-overlay backend for the renderer, and audio/TTS/host layers as needed.
 
 ## `crustagent-format` — status
 
@@ -70,7 +71,16 @@ cargo run -p crustagent-format --example dump     -- assets/agents/Merlin.acs
 cargo run -p crustagent-format --example render   -- assets/agents/Merlin.acs Greet 0   # one frame -> PNG
 cargo run -p crustagent-core   --example sequence -- assets/agents/Merlin.acs Greet     # print the timeline
 cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs GetAttention  # gesture -> GIF
+
+# See it on screen (opens a window, loops the gesture):
+cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention
+cargo run -p crustagent-render -- assets/agents/Merlin.acs Greet --float   # borderless always-on-top
 ```
+
+The viewer draws the character on a transparency checkerboard by default. `--float`
+requests a borderless, always-on-top, transparent window (the "desktop buddy" look); it
+relies on the OS honoring per-pixel window alpha, which the current software backend does
+not guarantee on macOS — a GPU/compositor backend for a true desktop overlay is planned.
 
 ## Provenance & license
 
