@@ -19,7 +19,7 @@ mod present;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crustagent::{Agent, Request};
+use crustagent::{Agent, BalloonKind, Request};
 use present::WgpuPresenter;
 
 use winit::application::ApplicationHandler;
@@ -40,7 +40,11 @@ fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
         ("Hide".to_string(), Request::Hide { fast: false }),
         (
             "Speak".to_string(),
-            Request::Speak("Hello from crustagent!".to_string()),
+            Request::Speak("Hello from crustagent! This is a longer line so you can watch the words appear one at a time.".to_string()),
+        ),
+        (
+            "Think".to_string(),
+            Request::Think("Hmm, let me think about that for a moment...".to_string()),
         ),
     ];
     let mut anims = agent.file().gesture_names.clone();
@@ -68,6 +72,23 @@ fn frame_empty(agent: &Agent, name: &str, first: bool) -> bool {
     let Some(frame) = frame else { return false };
     frame.images.is_empty()
         || matches!(file.composite_frame(frame, None), Ok(img) if img.is_fully_transparent())
+}
+
+/// Build the balloon paint colors from the character's own balloon style, falling back to
+/// readable defaults if the file's colors are degenerate (e.g. text == background).
+fn balloon_paint(agent: &Agent, kind: BalloonKind) -> paint::BalloonPaint {
+    let s = agent.balloon_style();
+    let (mut bg, mut text) = (s.bg, s.fg);
+    if bg == text {
+        bg = (0xFF, 0xFF, 0xE1);
+        text = (0x10, 0x10, 0x10);
+    }
+    paint::BalloonPaint {
+        bg: [bg.0, bg.1, bg.2],
+        border: [s.border.0, s.border.1, s.border.2],
+        text: [text.0, text.1, text.2],
+        think: matches!(kind, BalloonKind::Think),
+    }
 }
 
 fn make_window(el: &ActiveEventLoop, w: u32, h: u32, title: &str) -> Arc<Window> {
@@ -110,6 +131,9 @@ struct App {
     // graceful shutdown: play Goodbye + Hide before exiting
     quitting: bool,
     quit_deadline: Option<Instant>,
+
+    // print the agent's event stream to stdout (--events)
+    log_events: bool,
 }
 
 impl App {
@@ -271,7 +295,8 @@ impl App {
             } else {
                 (w as i32 / 2, h as i32 - 1)
             };
-            canvas.balloon(&bv.layout.lines, tip_x, tip_y, below);
+            let style = balloon_paint(&self.agent, bv.kind);
+            canvas.balloon(&bv.layout.lines, tip_x, tip_y, below, &style);
         }
     }
 }
@@ -353,8 +378,10 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if is_char {
+                    let (cx, cy) = self.cursor;
                     match button {
                         MouseButton::Right => {
+                            self.agent.report_click(crustagent::MouseButton::Right, cx, cy);
                             let screen = self
                                 .char_window
                                 .as_ref()
@@ -367,10 +394,14 @@ impl ApplicationHandler for App {
                             }
                         }
                         MouseButton::Left => {
+                            self.agent.report_click(crustagent::MouseButton::Left, cx, cy);
                             if self.menu_open {
                                 self.close_menu();
                             } else if let Some(window) = &self.char_window {
+                                // Whole-body drag; report it so a host can react.
+                                self.agent.report_drag_start();
                                 let _ = window.drag_window();
+                                self.agent.report_drag_complete();
                             }
                         }
                         _ => {}
@@ -425,6 +456,14 @@ impl ApplicationHandler for App {
         self.last = now;
         self.agent.update(dt);
 
+        // Surface the agent's event stream (what an integrating app would consume).
+        let events = self.agent.drain_events();
+        if self.log_events {
+            for e in &events {
+                println!("[event] {e:?}");
+            }
+        }
+
         // Once Goodbye + Hide finish (character no longer visible), or on timeout, exit.
         if self.quitting {
             let hidden = !self.agent.is_visible();
@@ -461,13 +500,20 @@ fn main() {
 
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
-        let (w, h) = (420u32, 120u32);
+        let (w, h) = (460u32, 130u32);
         let mut buf = vec![0x50u8; (w * h * 4) as usize];
         for px in buf.chunks_exact_mut(4) {
             px[3] = 0xFF;
         }
+        let style = |think| paint::BalloonPaint {
+            bg: [0xFF, 0xFF, 0xE1],
+            border: [0x40, 0x40, 0x40],
+            text: [0x10, 0x10, 0x10],
+            think,
+        };
         let mut canvas = paint::Canvas::new(&mut buf, w, h);
-        canvas.balloon(&["Hello from crustagent!".to_string()], (w / 2) as i32, 108, false);
+        canvas.balloon(&["Speech balloon".to_string()], 110, 118, false, &style(false));
+        canvas.balloon(&["Thought balloon".to_string()], 350, 118, false, &style(true));
         std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
         println!("wrote {out}");
         return;
@@ -571,6 +617,7 @@ fn main() {
         last: Instant::now(),
         quitting: false,
         quit_deadline: None,
+        log_events: args.iter().any(|a| a == "--events"),
     };
 
     let event_loop = EventLoop::new().expect("event loop");

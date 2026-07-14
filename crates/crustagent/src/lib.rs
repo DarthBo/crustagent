@@ -30,10 +30,15 @@
 use std::collections::VecDeque;
 
 use crustagent_core::{
-    sequence_animation, sequence_exit, wrap_words, BalloonLayout, Character, Direction,
-    IdleDirector, MoveTo, SplitMix64,
+    parse_speech, sequence_animation, sequence_exit, wrap_last_rows, wrap_words, BalloonLayout,
+    Character, Direction, IdleDirector, MoveTo, SplitMix64,
 };
-use crustagent_format::{AcsFile, MouthOverlay, ReturnKind, Rgba};
+use crustagent_format::{char_style, AcsFile, MouthOverlay, ReturnKind, Rgba};
+
+/// How long an auto-hiding balloon lingers, fully revealed, before disappearing (ms).
+const AUTO_HIDE_MS: u32 = 3000;
+/// Per-word reveal pacing for a silent `Think` balloon (ms).
+const THINK_PACE_MS: u32 = 300;
 
 pub use crustagent_format::{self as format, AcsFile as CharacterFile};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent};
@@ -49,14 +54,102 @@ pub enum Request {
     Hide { fast: bool },
     /// Play a named gesture (its full base + `…Continued` + `…Return`).
     Play(String),
-    /// Show a balloon and pace the words (no audio yet).
+    /// Speak: show a balloon, pace the words, and drive the TTS engine + mouth.
     Speak(String),
+    /// Think: show a thought balloon (no audio), pacing the words silently.
+    Think(String),
     /// Walk to a screen point at `speed` pixels/second.
     MoveTo { x: i32, y: i32, speed: u32 },
     /// Point toward a screen point.
     GestureAt { x: i32, y: i32 },
     /// Hold for a number of milliseconds.
     Wait(u32),
+}
+
+/// A handle to an enqueued request, returned by the request methods. Pair it with
+/// [`Event::RequestStarted`]/[`Event::RequestCompleted`] to track a specific action.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct ReqId(pub u64);
+
+/// A pointer button, for the input events a host reports back to the agent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// A speak vs. think balloon (the tail shape differs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BalloonKind {
+    /// Spoken — pointed triangular tail.
+    Speak,
+    /// Thought — trail of shrinking bubbles.
+    Think,
+}
+
+/// Something the agent reports to its host. Drain with [`Agent::drain_events`] each tick.
+///
+/// The lifecycle variants are raised by the agent itself; the input variants
+/// ([`Clicked`](Event::Clicked), [`DragStarted`](Event::DragStarted), …) are ones the host
+/// feeds back in (via [`Agent::report_click`] etc.) so an app can consume a single event
+/// stream.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Event {
+    /// A queued request began.
+    RequestStarted(ReqId),
+    /// A queued request finished (completed or was cut short by [`Agent::stop`]).
+    RequestCompleted(ReqId),
+    /// The character became visible.
+    Shown,
+    /// The character became hidden.
+    Hidden,
+    /// Auto-idling began (queue drained, character visible).
+    IdleStarted,
+    /// Auto-idling ended (a request preempted it).
+    IdleEnded,
+    /// A balloon appeared.
+    BalloonShown,
+    /// A balloon disappeared.
+    BalloonHidden,
+    /// Speech (audio + reveal) began.
+    SpeechStarted,
+    /// Speech finished.
+    SpeechEnded,
+    /// A `\Mrk=N` bookmark was reached during speech.
+    Bookmark(i64),
+    /// The character moved (during a `MoveTo` or a host-reported drag).
+    Moved { x: i32, y: i32 },
+    /// The host reported a click on the character.
+    Clicked { button: MouseButton, x: i32, y: i32 },
+    /// The host reported a double-click.
+    DoubleClicked { button: MouseButton, x: i32, y: i32 },
+    /// The host reported the start of a drag.
+    DragStarted,
+    /// The host reported the end of a drag.
+    DragCompleted,
+}
+
+/// The resolved word-balloon styling for a character (from its file's balloon block and
+/// style flags, with sensible fallbacks).
+#[derive(Clone, Copy, Debug)]
+pub struct BalloonStyle {
+    /// Text color (RGB).
+    pub fg: (u8, u8, u8),
+    /// Background color (RGB).
+    pub bg: (u8, u8, u8),
+    /// Border color (RGB).
+    pub border: (u8, u8, u8),
+    /// Max lines in a fixed-size balloon (the box scrolls past this).
+    pub lines: usize,
+    /// Characters per line (wrap width).
+    pub per_line: usize,
+    /// Grow the balloon to fit the whole phrase instead of scrolling a fixed box.
+    pub size_to_text: bool,
+    /// Auto-hide the balloon a few seconds after speech ends.
+    pub auto_hide: bool,
+    /// Reveal words progressively (vs. all at once).
+    pub auto_pace: bool,
 }
 
 /// What the balloon currently shows (already wrapped to the visible words).
@@ -71,6 +164,8 @@ pub struct BalloonView {
     pub total_words: usize,
     /// Words revealed so far.
     pub shown_words: usize,
+    /// Speak or think (chooses the tail shape).
+    pub kind: BalloonKind,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,6 +179,7 @@ enum Activity {
     Hiding,
     Move,
     Speak,
+    Think,
     Wait,
 }
 
@@ -108,6 +204,24 @@ impl AudioSink for NullSink {
     fn play(&mut self, _wav: &[u8]) {}
 }
 
+/// Resolve the character's balloon styling from its file (balloon block + style flags),
+/// falling back to Microsoft Agent's defaults (2×32, info colors, auto-pace + auto-hide).
+fn resolve_balloon_style(file: &AcsFile) -> BalloonStyle {
+    let flags = file.header.style;
+    let b = file.balloon.as_ref();
+    let rgb = |c: &crustagent_format::Color| (c.r, c.g, c.b);
+    BalloonStyle {
+        fg: b.map(|b| rgb(&b.fg_color)).unwrap_or((0x00, 0x00, 0x00)),
+        bg: b.map(|b| rgb(&b.bg_color)).unwrap_or((0xFF, 0xFF, 0xE1)),
+        border: b.map(|b| rgb(&b.border_color)).unwrap_or((0x40, 0x40, 0x40)),
+        lines: b.map(|b| b.lines as usize).filter(|&n| n > 0).unwrap_or(2),
+        per_line: b.map(|b| b.per_line as usize).filter(|&n| n > 0).unwrap_or(32),
+        size_to_text: flags & char_style::SIZE_TO_TEXT != 0,
+        auto_hide: flags & char_style::NO_AUTO_HIDE == 0,
+        auto_pace: flags & char_style::NO_AUTO_PACE == 0,
+    }
+}
+
 /// An embedded, drivable character.
 pub struct Agent {
     file: AcsFile,
@@ -116,10 +230,18 @@ pub struct Agent {
 
     visible: bool,
     position: (i32, i32),
-    per_line: usize,
+    style: BalloonStyle,
 
-    queue: VecDeque<Request>,
+    queue: VecDeque<(ReqId, Request)>,
     activity: Activity,
+
+    // events / request tracking
+    events: Vec<Event>,
+    next_id: u64,
+    current_req: Option<ReqId>,
+    idle_active: bool,
+    paused: bool,
+    paused_word: usize,
 
     // current animation "track"
     track: Vec<TrackFrame>,
@@ -130,9 +252,16 @@ pub struct Agent {
     // move / speak state
     movement: MoveTo,
     tts: Box<dyn TtsEngine>,
+    think_timer: TimedTts,
     speak_words: Vec<String>,
     speak_shown: usize,
     speak_mouth: Option<MouthOverlay>,
+    pending_bookmarks: Vec<(i64, usize)>,
+
+    // balloon presentation (decoupled from the queue so it can linger/auto-hide)
+    balloon_kind: Option<BalloonKind>,
+    balloon_done: bool,
+    balloon_hold_ms: u32,
 
     // sound effects
     audio: Box<dyn AudioSink>,
@@ -148,30 +277,36 @@ impl Agent {
     /// Build an agent from an already-parsed character.
     pub fn from_file(file: AcsFile) -> Agent {
         let idle = IdleDirector::new(&Character::new(&file));
-        let per_line = file
-            .balloon
-            .as_ref()
-            .map(|b| b.per_line as usize)
-            .filter(|&n| n > 0)
-            .unwrap_or(32);
+        let style = resolve_balloon_style(&file);
         Agent {
             file,
             rng: SplitMix64::new(0),
             idle,
             visible: false,
             position: (0, 0),
-            per_line,
+            style,
             queue: VecDeque::new(),
             activity: Activity::Hidden,
+            events: Vec::new(),
+            next_id: 1,
+            current_req: None,
+            idle_active: false,
+            paused: false,
+            paused_word: 0,
             track: Vec::new(),
             track_total_ms: 1,
             track_loops: false,
             track_elapsed_ms: 0,
             movement: MoveTo::new((0, 0), (0, 0), 0),
             tts: Box::new(TimedTts::new()),
+            think_timer: TimedTts::new().with_pace(THINK_PACE_MS),
             speak_words: Vec::new(),
             speak_shown: 0,
             speak_mouth: None,
+            pending_bookmarks: Vec::new(),
+            balloon_kind: None,
+            balloon_done: false,
+            balloon_hold_ms: 0,
             audio: Box::new(NullSink),
             last_track_index: None,
         }
@@ -221,55 +356,155 @@ impl Agent {
 
     /// Set the top-left screen position directly (e.g. after a user drag).
     pub fn set_position(&mut self, x: i32, y: i32) {
-        self.position = (x, y);
+        if self.position != (x, y) {
+            self.position = (x, y);
+            self.emit(Event::Moved { x, y });
+        }
+    }
+
+    /// The resolved word-balloon styling (colors, size, flags) for this character.
+    pub fn balloon_style(&self) -> BalloonStyle {
+        self.style
+    }
+
+    // -- events --------------------------------------------------------------
+
+    /// Take all events accumulated since the last drain.
+    pub fn drain_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Pop a single event, oldest first.
+    pub fn poll_event(&mut self) -> Option<Event> {
+        if self.events.is_empty() {
+            None
+        } else {
+            Some(self.events.remove(0))
+        }
+    }
+
+    /// Report a click on the character (raised back as [`Event::Clicked`]).
+    pub fn report_click(&mut self, button: MouseButton, x: i32, y: i32) {
+        self.emit(Event::Clicked { button, x, y });
+    }
+    /// Report a double-click on the character.
+    pub fn report_double_click(&mut self, button: MouseButton, x: i32, y: i32) {
+        self.emit(Event::DoubleClicked { button, x, y });
+    }
+    /// Report the start of a user drag.
+    pub fn report_drag_start(&mut self) {
+        self.emit(Event::DragStarted);
+    }
+    /// Report the end of a user drag.
+    pub fn report_drag_complete(&mut self) {
+        self.emit(Event::DragCompleted);
+    }
+
+    fn emit(&mut self, e: Event) {
+        self.events.push(e);
+    }
+
+    fn set_visible(&mut self, v: bool) {
+        if v != self.visible {
+            self.visible = v;
+            self.emit(if v { Event::Shown } else { Event::Hidden });
+            if !v {
+                self.clear_balloon();
+            }
+        }
     }
 
     // -- enqueue -------------------------------------------------------------
 
-    /// Enqueue a request.
-    pub fn request(&mut self, req: Request) {
-        self.queue.push_back(req);
+    /// Enqueue a request, returning a handle you can match against request events.
+    pub fn request(&mut self, req: Request) -> ReqId {
+        let id = ReqId(self.next_id);
+        self.next_id += 1;
+        self.queue.push_back((id, req));
+        id
     }
     /// Show the character, playing its SHOWING animation.
-    pub fn show(&mut self) {
-        self.request(Request::Show { fast: false });
+    pub fn show(&mut self) -> ReqId {
+        self.request(Request::Show { fast: false })
     }
     /// Show the character instantly (no SHOWING animation).
-    pub fn show_fast(&mut self) {
-        self.request(Request::Show { fast: true });
+    pub fn show_fast(&mut self) -> ReqId {
+        self.request(Request::Show { fast: true })
     }
     /// Hide the character, playing its HIDING animation.
-    pub fn hide(&mut self) {
-        self.request(Request::Hide { fast: false });
+    pub fn hide(&mut self) -> ReqId {
+        self.request(Request::Hide { fast: false })
     }
     /// Hide the character instantly (no HIDING animation).
-    pub fn hide_fast(&mut self) {
-        self.request(Request::Hide { fast: true });
+    pub fn hide_fast(&mut self) -> ReqId {
+        self.request(Request::Hide { fast: true })
     }
-    pub fn play(&mut self, animation: impl Into<String>) {
-        self.request(Request::Play(animation.into()));
+    pub fn play(&mut self, animation: impl Into<String>) -> ReqId {
+        self.request(Request::Play(animation.into()))
     }
-    pub fn speak(&mut self, text: impl Into<String>) {
-        self.request(Request::Speak(text.into()));
+    pub fn speak(&mut self, text: impl Into<String>) -> ReqId {
+        self.request(Request::Speak(text.into()))
     }
-    pub fn move_to(&mut self, x: i32, y: i32, speed: u32) {
-        self.request(Request::MoveTo { x, y, speed });
+    /// Show a thought balloon (no audio), pacing the words silently.
+    pub fn think(&mut self, text: impl Into<String>) -> ReqId {
+        self.request(Request::Think(text.into()))
     }
-    pub fn gesture_at(&mut self, x: i32, y: i32) {
-        self.request(Request::GestureAt { x, y });
+    pub fn move_to(&mut self, x: i32, y: i32, speed: u32) -> ReqId {
+        self.request(Request::MoveTo { x, y, speed })
     }
-    pub fn wait(&mut self, ms: u32) {
-        self.request(Request::Wait(ms));
+    pub fn gesture_at(&mut self, x: i32, y: i32) -> ReqId {
+        self.request(Request::GestureAt { x, y })
     }
-    /// Clear the queue (does not interrupt the current activity's frame).
+    pub fn wait(&mut self, ms: u32) -> ReqId {
+        self.request(Request::Wait(ms))
+    }
+    /// Clear the queue (does not interrupt the current activity's frame). Any not-yet-run
+    /// requests are reported as completed.
     pub fn stop(&mut self) {
-        self.queue.clear();
+        let cancelled: Vec<ReqId> = self.queue.drain(..).map(|(id, _)| id).collect();
+        for id in cancelled {
+            self.emit(Event::RequestCompleted(id));
+        }
+    }
+
+    // -- speech control ------------------------------------------------------
+
+    /// Pause speech/animation, remembering the revealed-word position.
+    pub fn pause(&mut self) {
+        if !self.paused {
+            self.paused = true;
+            self.paused_word = self.speak_shown;
+        }
+    }
+    /// Resume after [`pause`](Agent::pause).
+    pub fn resume(&mut self) {
+        self.paused = false;
+    }
+    /// Whether the agent is paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+    /// Dismiss the balloon now (if any), raising [`Event::BalloonHidden`].
+    pub fn hide_balloon(&mut self) {
+        self.clear_balloon();
+    }
+
+    fn clear_balloon(&mut self) {
+        if self.balloon_kind.take().is_some() {
+            self.balloon_done = false;
+            self.balloon_hold_ms = 0;
+            self.emit(Event::BalloonHidden);
+        }
     }
 
     // -- tick ----------------------------------------------------------------
 
     /// Advance by `dt_ms` milliseconds.
     pub fn update(&mut self, dt_ms: u32) {
+        if self.paused {
+            return; // frozen: animation, speech reveal, and the balloon all hold
+        }
+
         // Idle/hidden yields immediately to any queued request.
         if !self.queue.is_empty()
             && matches!(
@@ -285,25 +520,19 @@ impl Agent {
         match self.activity {
             Activity::Hidden => {}
             Activity::Move => {
+                let before = self.position;
                 self.movement.advance(dt_ms);
                 self.position = self.movement.position();
+                if self.position != before {
+                    let (x, y) = self.position;
+                    self.emit(Event::Moved { x, y });
+                }
                 if self.movement.is_done() {
                     self.next();
                 }
             }
-            Activity::Speak => {
-                for event in self.tts.poll(dt_ms) {
-                    match event {
-                        VoiceEvent::WordStarted(i) => self.speak_shown = i + 1,
-                        VoiceEvent::Mouth(m) => self.speak_mouth = Some(m),
-                        _ => {}
-                    }
-                }
-                if !self.tts.is_speaking() {
-                    self.speak_mouth = None;
-                    self.next();
-                }
-            }
+            Activity::Speak => self.advance_speech(dt_ms, false),
+            Activity::Think => self.advance_speech(dt_ms, true),
             Activity::Wait | Activity::IdleRest => {
                 if self.track_elapsed_ms >= self.track_total_ms {
                     self.next();
@@ -312,12 +541,15 @@ impl Agent {
             Activity::Idle | Activity::Gesture | Activity::Hiding => {
                 if self.track_finished() {
                     if self.activity == Activity::Hiding {
-                        self.visible = false;
+                        self.set_visible(false);
                     }
                     self.next();
                 }
             }
         }
+
+        // Auto-hide the balloon a few seconds after its content finished revealing.
+        self.tick_balloon(dt_ms);
 
         // Play the current frame's embedded sound effect on entry.
         if self.visible {
@@ -325,14 +557,103 @@ impl Agent {
         }
     }
 
+    /// Poll the active speech/think engine, reveal words, fire bookmarks, and finish.
+    fn advance_speech(&mut self, dt_ms: u32, think: bool) {
+        let events = if think {
+            self.think_timer.poll(dt_ms)
+        } else {
+            self.tts.poll(dt_ms)
+        };
+        for event in events {
+            match event {
+                VoiceEvent::WordStarted(i) => {
+                    if self.style.auto_pace {
+                        self.speak_shown = i + 1;
+                        self.fire_bookmarks();
+                    }
+                }
+                VoiceEvent::Mouth(m) if !think => self.speak_mouth = Some(m),
+                _ => {}
+            }
+        }
+        let done = if think {
+            !self.think_timer.is_speaking()
+        } else {
+            !self.tts.is_speaking()
+        };
+        if done {
+            self.speak_mouth = None;
+            self.speak_shown = self.speak_words.len();
+            self.fire_bookmarks();
+            self.balloon_done = true;
+            self.balloon_hold_ms = if self.style.auto_hide { AUTO_HIDE_MS } else { u32::MAX };
+            if !think {
+                self.emit(Event::SpeechEnded);
+            }
+            self.next();
+        }
+    }
+
+    /// Raise any pending bookmarks whose word position the reveal has now passed.
+    fn fire_bookmarks(&mut self) {
+        while let Some(&(id, threshold)) = self.pending_bookmarks.first() {
+            if threshold <= self.speak_shown {
+                self.pending_bookmarks.remove(0);
+                self.emit(Event::Bookmark(id));
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Count down an auto-hiding balloon and clear it when the linger expires.
+    fn tick_balloon(&mut self, dt_ms: u32) {
+        if self.balloon_kind.is_some() && self.balloon_done && self.balloon_hold_ms != u32::MAX {
+            self.balloon_hold_ms = self.balloon_hold_ms.saturating_sub(dt_ms);
+            if self.balloon_hold_ms == 0 {
+                self.clear_balloon();
+            }
+        }
+    }
+
+    /// Set up the balloon for a new speak/think phrase.
+    fn begin_balloon(&mut self, kind: BalloonKind, words: Vec<String>, bookmarks: Vec<(i64, usize)>) {
+        self.clear_balloon(); // replace any lingering balloon (emits BalloonHidden)
+        self.speak_words = words;
+        self.speak_shown = if self.style.auto_pace {
+            0
+        } else {
+            self.speak_words.len()
+        };
+        self.pending_bookmarks = bookmarks;
+        self.pending_bookmarks.sort_by_key(|&(_, threshold)| threshold);
+        self.balloon_kind = Some(kind);
+        self.balloon_done = false;
+        self.balloon_hold_ms = 0;
+        self.emit(Event::BalloonShown);
+    }
+
     fn track_finished(&self) -> bool {
         !self.track_loops && self.track_elapsed_ms >= self.track_total_ms
     }
 
     fn next(&mut self) {
-        if let Some(req) = self.queue.pop_front() {
+        if let Some(id) = self.current_req.take() {
+            self.emit(Event::RequestCompleted(id));
+        }
+        if let Some((id, req)) = self.queue.pop_front() {
+            if self.idle_active {
+                self.idle_active = false;
+                self.emit(Event::IdleEnded);
+            }
+            self.current_req = Some(id);
+            self.emit(Event::RequestStarted(id));
             self.start(req);
         } else if self.visible {
+            if !self.idle_active {
+                self.idle_active = true;
+                self.emit(Event::IdleStarted);
+            }
             // Alternate: rest a beat, then one idle animation, then rest again.
             if self.activity == Activity::IdleRest {
                 self.start_idle_animation();
@@ -347,7 +668,7 @@ impl Agent {
     fn start(&mut self, req: Request) {
         match req {
             Request::Show { fast } => {
-                self.visible = true;
+                self.set_visible(true);
                 if fast {
                     // Appear instantly; proceed straight to the next request (e.g. a
                     // greeting that starts empty) or to idling — no in-between frame.
@@ -358,7 +679,7 @@ impl Agent {
             }
             Request::Hide { fast } => {
                 if fast {
-                    self.visible = false;
+                    self.set_visible(false);
                     self.activity = Activity::Hidden;
                     self.next();
                 } else {
@@ -380,13 +701,23 @@ impl Agent {
                 self.start_state(dir.move_state(), true, Activity::Move);
             }
             Request::Speak(text) => {
-                let parsed = crustagent_core::parse_speech(&text);
+                let parsed = parse_speech(&text);
                 let spoken = parsed.spoken_text();
-                self.speak_words = parsed.display_words;
-                self.speak_shown = 0;
                 self.speak_mouth = None;
-                self.tts.speak(&spoken, self.speak_words.len());
+                self.begin_balloon(BalloonKind::Speak, parsed.display_words, parsed.bookmark_at);
+                self.tts.speak(&spoken, self.speak_words.len().max(1));
+                self.emit(Event::SpeechStarted);
                 self.start_state("SPEAKING", true, Activity::Speak);
+            }
+            Request::Think(text) => {
+                let parsed = parse_speech(&text);
+                self.speak_mouth = None;
+                self.begin_balloon(BalloonKind::Think, parsed.display_words, parsed.bookmark_at);
+                // Silent pacing; keep the current pose (a Think has no dedicated state).
+                self.think_timer.speak("", self.speak_words.len().max(1));
+                self.build_rest_track();
+                self.track_loops = true;
+                self.activity = Activity::Think;
             }
             Request::Wait(ms) => {
                 // freeze the current frame for `ms`
@@ -623,20 +954,49 @@ impl Agent {
         self.file.composite_frame(frame, self.current_mouth()).ok()
     }
 
-    /// The balloon to draw now, or `None` when not speaking.
+    /// The balloon to draw now, or `None` when none is showing. Independent of the current
+    /// activity: a balloon can linger (auto-hiding) while the character resumes idling.
     pub fn balloon(&self) -> Option<BalloonView> {
-        if self.activity != Activity::Speak || self.speak_words.is_empty() {
+        let kind = self.balloon_kind?;
+        if self.speak_words.is_empty() {
             return None;
         }
         let total = self.speak_words.len();
-        let shown = self.speak_shown.clamp(1, total);
-        let layout = wrap_words(&self.speak_words[..shown], self.per_line);
-        let full = wrap_words(&self.speak_words, self.per_line);
+        let shown = if self.balloon_done {
+            total
+        } else {
+            self.speak_shown.clamp(1, total)
+        };
+        let per_line = self.style.per_line;
+        let (layout, full) = if self.style.size_to_text {
+            // Grow to fit: draw the revealed words; size the window to the whole phrase.
+            (
+                wrap_words(&self.speak_words[..shown], per_line),
+                wrap_words(&self.speak_words, per_line),
+            )
+        } else {
+            // Fixed box: scroll the revealed words within `lines` rows.
+            let rows = self.style.lines;
+            (
+                wrap_last_rows(&self.speak_words[..shown], per_line, rows),
+                fixed_box_layout(per_line, rows),
+            )
+        };
         Some(BalloonView {
             layout,
             full,
             total_words: total,
             shown_words: shown,
+            kind,
         })
+    }
+}
+
+/// A blank layout sized to a fixed `per_line`×`rows` box, for sizing a scrolling balloon.
+fn fixed_box_layout(per_line: usize, rows: usize) -> BalloonLayout {
+    BalloonLayout {
+        lines: vec![String::new(); rows.max(1)],
+        cols: per_line,
+        rows: rows.max(1),
     }
 }

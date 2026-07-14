@@ -18,6 +18,15 @@ pub fn balloon_size(cols: usize, rows: usize) -> (u32, u32) {
     (bw.max(16) as u32, bh.max(16) as u32)
 }
 
+/// Colors + shape for painting a balloon.
+pub struct BalloonPaint {
+    pub bg: [u8; 3],
+    pub border: [u8; 3],
+    pub text: [u8; 3],
+    /// A thought balloon (bubble-trail tail) vs. a speech balloon (pointed tail).
+    pub think: bool,
+}
+
 /// A borrowed RGBA8 drawing target.
 pub struct Canvas<'a> {
     buf: &'a mut [u8],
@@ -102,14 +111,33 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw a speech balloon whose tail points at `(tip_x, tip_y)` — the character's head
+    /// A filled disc of radius `r` at `(cx, cy)` with a one-pixel border ring.
+    fn disc(&mut self, cx: i32, cy: i32, r: i32, fill: [u8; 3], border: [u8; 3]) {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= r * r {
+                    let c = if d2 >= (r - 1) * (r - 1) { border } else { fill };
+                    self.put(cx + dx, cy + dy, c);
+                }
+            }
+        }
+    }
+
+    /// Draw a word balloon whose tail points at `(tip_x, tip_y)` — the character's head
     /// (`below == false`, balloon sits above, tail down) or chin (`below == true`, balloon
-    /// sits below, tail up). The tail merges into the body, the balloon is kept on-window,
+    /// sits below, tail up). A **speech** balloon gets a pointed tail merged into the body;
+    /// a **think** balloon gets a trail of shrinking bubbles. The balloon is kept on-window
     /// and the tail leans toward `tip_x` so it stays aimed at the character.
-    pub fn balloon(&mut self, lines: &[String], tip_x: i32, tip_y: i32, below: bool) {
-        let bg = [0xFF, 0xFF, 0xE8];
-        let border = [0x40, 0x40, 0x40];
-        let text = [0x10, 0x10, 0x10];
+    pub fn balloon(
+        &mut self,
+        lines: &[String],
+        tip_x: i32,
+        tip_y: i32,
+        below: bool,
+        style: &BalloonPaint,
+    ) {
+        let (bg, border, text) = (style.bg, style.border, style.text);
 
         let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as i32;
         let rows = lines.len() as i32;
@@ -129,30 +157,39 @@ impl<'a> Canvas<'a> {
         } else {
             tip_y - tail_len - bh
         };
-        // Tail attaches at the body edge nearest the tip; its base leans toward tip_x.
         let attach_y = if below { by } else { by + bh - 1 };
-        let far_y = if below { by + bh - 1 } else { by };
-        let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
 
-        // body + tail fill
         self.fill_rect(bx, by, bw, bh, bg);
-        for row in 0..=tail_len {
-            let half = tail_half - row * tail_half / tail_len;
-            let y = if below { attach_y - row } else { attach_y + row };
-            self.fill_rect(tcx - half, y, half * 2 + 1, 1, bg);
-            self.put(tcx - half, y, border);
-            self.put(tcx + half, y, border);
-        }
 
-        // outline: sides, the far edge in full, and the attach edge with a tail gap
-        for y in by..by + bh {
-            self.put(bx, y, border);
-            self.put(bx + bw - 1, y, border);
-        }
-        for x in bx..bx + bw {
-            self.put(x, far_y, border);
-            if x < tcx - tail_half || x > tcx + tail_half {
-                self.put(x, attach_y, border);
+        if style.think {
+            // Full border, then a trail of shrinking bubbles toward the tip.
+            self.stroke_rect(bx, by, bw, bh, border);
+            let tcx = tip_x.clamp(bx + 8, bx + bw - 8);
+            for (t, r) in [(0.32f32, 5i32), (0.62, 4), (0.88, 3)] {
+                let cx = tcx + ((tip_x - tcx) as f32 * t) as i32;
+                let cy = attach_y + ((tip_y - attach_y) as f32 * t) as i32;
+                self.disc(cx, cy, r, bg, border);
+            }
+        } else {
+            // Pointed tail, merged into the body with a border gap on the attach edge.
+            let far_y = if below { by + bh - 1 } else { by };
+            let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
+            for row in 0..=tail_len {
+                let half = tail_half - row * tail_half / tail_len;
+                let y = if below { attach_y - row } else { attach_y + row };
+                self.fill_rect(tcx - half, y, half * 2 + 1, 1, bg);
+                self.put(tcx - half, y, border);
+                self.put(tcx + half, y, border);
+            }
+            for y in by..by + bh {
+                self.put(bx, y, border);
+                self.put(bx + bw - 1, y, border);
+            }
+            for x in bx..bx + bw {
+                self.put(x, far_y, border);
+                if x < tcx - tail_half || x > tcx + tail_half {
+                    self.put(x, attach_y, border);
+                }
             }
         }
 

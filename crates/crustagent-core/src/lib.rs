@@ -38,7 +38,7 @@ pub mod rng;
 pub mod sequence;
 pub mod text;
 
-pub use balloon::{wrap_words, BalloonLayout};
+pub use balloon::{wrap_last_rows, wrap_words, BalloonLayout};
 pub use character::Character;
 pub use idle::IdleDirector;
 pub use motion::{Direction, MoveTo};

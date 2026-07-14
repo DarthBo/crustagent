@@ -47,10 +47,14 @@ fn show_speak_move_hide() {
     run(&mut agent, 700); // ~2 more words paced in
     let b1 = agent.balloon().expect("still speaking");
     assert!(b1.shown_words > b0.shown_words, "words should reveal over time");
-    // After the phrase finishes, balloon clears and it idles again.
+    // After the phrase finishes speaking, the balloon lingers (auto-hide) fully revealed,
+    // then clears — while the character resumes idling.
     run(&mut agent, 2000);
-    assert!(agent.balloon().is_none());
+    let done = agent.balloon().expect("balloon lingers after speech");
+    assert_eq!(done.shown_words, done.total_words);
     assert!(agent.is_visible());
+    run(&mut agent, 3500); // past the auto-hide linger
+    assert!(agent.balloon().is_none());
 
     // Move -> position ends at the destination.
     agent.set_position(0, 0);
@@ -145,4 +149,100 @@ fn exit_branching_gesture_plays_its_return() {
         elapsed > 700,
         "Pleased ended after only {elapsed}ms — exit return not played"
     );
+}
+
+#[test]
+fn emits_lifecycle_and_request_events() {
+    use crustagent::Event;
+    let Some(mut agent) = merlin() else { return };
+
+    let show = agent.show();
+    let mut events = Vec::new();
+    run_collect(&mut agent, 3000, &mut events);
+
+    // The show request starts and completes, and the character reports becoming visible.
+    assert!(events.contains(&Event::RequestStarted(show)));
+    assert!(events.contains(&Event::RequestCompleted(show)));
+    assert!(events.contains(&Event::Shown));
+    // Draining an idle queue eventually reports idling.
+    assert!(events.contains(&Event::IdleStarted));
+
+    // A speak request raises balloon + speech events, ended by SpeechEnded.
+    events.clear();
+    agent.speak("one two three");
+    run_collect(&mut agent, 2000, &mut events);
+    assert!(events.contains(&Event::BalloonShown));
+    assert!(events.contains(&Event::SpeechStarted));
+    assert!(events.contains(&Event::SpeechEnded));
+    assert!(events.iter().any(|e| matches!(e, Event::IdleEnded)));
+}
+
+#[test]
+fn fires_bookmarks_in_order() {
+    use crustagent::Event;
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 2000);
+
+    let mut events = Vec::new();
+    agent.speak(r"first \Mrk=10\ second \Mrk=20\ third");
+    run_collect(&mut agent, 3000, &mut events);
+
+    let marks: Vec<i64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Bookmark(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, vec![10, 20], "bookmarks should fire in order");
+}
+
+#[test]
+fn think_shows_a_thought_balloon_without_speech() {
+    use crustagent::{BalloonKind, Event};
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 2000);
+
+    let mut events = Vec::new();
+    agent.think("pondering deeply");
+    agent.update(16);
+    let b = agent.balloon().expect("think balloon");
+    assert_eq!(b.kind, BalloonKind::Think);
+
+    run_collect(&mut agent, 3000, &mut events);
+    // A think raises balloon events but no speech events.
+    assert!(events.contains(&Event::BalloonShown));
+    assert!(!events.contains(&Event::SpeechStarted));
+}
+
+#[test]
+fn pause_freezes_word_reveal() {
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 2000);
+    agent.speak("alpha bravo charlie delta echo");
+    run(&mut agent, 350);
+    let before = agent.balloon().expect("speaking").shown_words;
+
+    agent.pause();
+    assert!(agent.is_paused());
+    run(&mut agent, 2000); // time passes, but frozen
+    assert_eq!(agent.balloon().expect("still shown").shown_words, before);
+
+    agent.resume();
+    run(&mut agent, 1000);
+    assert!(agent.balloon().map(|b| b.shown_words).unwrap_or(99) >= before);
+}
+
+/// Advance in 16ms steps, collecting drained events.
+fn run_collect(agent: &mut Agent, ms: u32, out: &mut Vec<crustagent::Event>) {
+    let mut left = ms;
+    while left > 0 {
+        let dt = left.min(16);
+        agent.update(dt);
+        out.extend(agent.drain_events());
+        left -= dt;
+    }
 }

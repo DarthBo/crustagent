@@ -41,12 +41,42 @@ pub fn wrap_words(words: &[String], per_line: usize) -> BalloonLayout {
     BalloonLayout { lines, cols, rows }
 }
 
+/// Wrap `words` like [`wrap_words`] but keep only the last `max_rows` lines. Because words
+/// reveal front-to-back, the most recent word is always on the last line, so keeping the
+/// tail lines makes a fixed-height balloon scroll to follow the speech. `max_rows` ≥ 1.
+pub fn wrap_last_rows(words: &[String], per_line: usize, max_rows: usize) -> BalloonLayout {
+    let mut l = wrap_words(words, per_line);
+    let max_rows = max_rows.max(1);
+    if l.lines.len() > max_rows {
+        l.lines.drain(0..l.lines.len() - max_rows);
+        l.cols = l.lines.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+        l.rows = l.lines.len();
+    }
+    l
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn w(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn last_rows_scrolls_to_the_tail() {
+        // 6 words wrap to 3 lines at width 10; a 2-row box shows the last two.
+        let full = wrap_words(&w("aaa bbb ccc ddd eee fff"), 7);
+        assert!(full.rows >= 3);
+        let paged = wrap_last_rows(&w("aaa bbb ccc ddd eee fff"), 7, 2);
+        assert_eq!(paged.rows, 2);
+        assert_eq!(paged.lines, full.lines[full.rows - 2..]);
+    }
+
+    #[test]
+    fn last_rows_noop_when_fits() {
+        let l = wrap_last_rows(&w("a b c"), 40, 2);
+        assert_eq!(l.lines, ["a b c"]);
     }
 
     #[test]

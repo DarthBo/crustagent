@@ -66,6 +66,9 @@ pub struct ParsedSpeech {
     pub display_words: Vec<String>,
     /// Ordered stream of spoken words and directives.
     pub speech: Vec<SpeechItem>,
+    /// Each `\Mrk=N` bookmark paired with the number of display words that precede it, so a
+    /// runtime can raise the bookmark as the balloon reveals past that word.
+    pub bookmark_at: Vec<(i64, usize)>,
 }
 
 impl ParsedSpeech {
@@ -162,12 +165,21 @@ pub fn parse_speech(input: &str) -> ParsedSpeech {
             k += 1;
         }
 
-        out.speech.push(SpeechItem::Tag(make_tag(&lname, &name, value)));
+        push_tag(&mut out, make_tag(&lname, &name, value));
         i = k;
     }
 
     flush_run(&mut run, &mut out);
     out
+}
+
+/// Push a directive onto the speech stream, recording a bookmark's display position (the
+/// number of display words emitted so far) so the runtime can fire it during reveal.
+fn push_tag(out: &mut ParsedSpeech, tag: Tag) {
+    if let Tag::Bookmark(id) = tag {
+        out.bookmark_at.push((id, out.display_words.len()));
+    }
+    out.speech.push(SpeechItem::Tag(tag));
 }
 
 fn flush_run(run: &mut String, out: &mut ParsedSpeech) {
@@ -211,8 +223,14 @@ fn parse_map(chars: &[char], at: usize, out: &mut ParsedSpeech) -> usize {
         out.display_words.push(w.to_string());
     }
     // Spoken half: parse recursively; its speech stream feeds ours (its display ignored).
+    // Bookmarks inside the spoken half are re-anchored to the current display position.
     let inner = parse_speech(&spk);
-    out.speech.extend(inner.speech);
+    for item in inner.speech {
+        match item {
+            SpeechItem::Tag(t) => push_tag(out, t),
+            w => out.speech.push(w),
+        }
+    }
     k
 }
 
@@ -326,6 +344,8 @@ mod tests {
             ]
         );
         assert_eq!(p.bookmarks().collect::<Vec<_>>(), vec![5]);
+        // The bookmark sits after "Hi" (1 display word) and before "there".
+        assert_eq!(p.bookmark_at, vec![(5, 1)]);
     }
 
     #[test]
