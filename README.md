@@ -23,14 +23,35 @@ these lovingly-made characters usable again wherever Rust runs.
 
 ```
 crates/
-  crustagent-format/   # pure, dependency-free parsers for the character file formats
-  crustagent-core/     # portable animation runtime (sequencing, branching, timing, text)
+  crustagent/          # embedding API: Agent + serial action queue (start here to embed)
+  crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACF header)
+  crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
-  crustagent-render/   # windowed viewer (winit + softbuffer) that plays a character
+  crustagent-render/   # windowed/floating viewer (winit + softbuffer/wgpu) driving an Agent
 ```
 
-Planned: the rest of `crustagent-core` (action queue + state machine + idle/move), a true
-transparent desktop-overlay backend for the renderer, and audio/TTS/host layers as needed.
+### Embed it
+
+```rust
+use crustagent::Agent;
+let mut agent = Agent::load("Merlin.acs")?;
+agent.show();
+agent.speak("Hello there!");
+agent.play("Wave");
+agent.move_to(400, 200, 300);
+loop {
+    agent.update(dt_ms);                       // advance by elapsed time
+    if let Some(frame) = agent.composite_current() { /* blit frame.pixels (RGBA) */ }
+    if let Some(b) = agent.balloon() { /* draw b.layout.lines */ }
+}
+```
+
+The `Agent` runs a serial action queue (`show`/`hide`/`play`/`speak`/`move_to`/
+`gesture_at`/`wait`), auto-idles when the queue drains, and hands back a composited RGBA
+frame + balloon + position each tick — windowing- and audio-agnostic.
+
+Planned: TTS/audio (real lip-sync), `.aca` bodies for ACF + the ACS 1.5 (OLE2) format,
+and a host-defined command API for the pop-up menu.
 
 ## `crustagent-format` — status
 
