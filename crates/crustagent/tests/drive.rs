@@ -1,7 +1,9 @@
 //! Drive an Agent through its lifecycle against a real character (skips if absent).
 
-use crustagent::Agent;
+use crustagent::{Agent, AudioSink};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn merlin() -> Option<Agent> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/agents/Merlin.acs");
@@ -79,6 +81,43 @@ fn gesture_and_stop() {
     agent.stop();
     run(&mut agent, 3000);
     assert!(agent.is_visible());
+}
+
+#[test]
+fn fires_embedded_sound_effects() {
+    let Some(mut agent) = merlin() else { return };
+
+    // Find an animation whose *first* frame carries a sound (deterministic: frame 0 always
+    // plays), so we can assert the sink is driven.
+    let anim = agent.file().animations.iter().enumerate().find_map(|(i, a)| {
+        a.frames
+            .first()
+            .is_some_and(|f| f.sound_ndx >= 0)
+            .then(|| agent.file().gesture_names[i].clone())
+    });
+    let Some(anim) = anim else {
+        eprintln!("no frame-0 sound animation in Merlin — skipping");
+        return;
+    };
+
+    struct Counter(Arc<AtomicUsize>);
+    impl AudioSink for Counter {
+        fn play(&mut self, _wav: &[u8]) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let count = Arc::new(AtomicUsize::new(0));
+    agent.set_audio_sink(Box::new(Counter(count.clone())));
+
+    agent.show();
+    run(&mut agent, 2000);
+    agent.play(anim.clone());
+    run(&mut agent, 500);
+
+    assert!(
+        count.load(Ordering::SeqCst) > 0,
+        "no sound effect fired for {anim}"
+    );
 }
 
 #[test]

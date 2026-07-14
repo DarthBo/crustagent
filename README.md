@@ -27,6 +27,7 @@ crates/
   crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACF header)
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
   crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SystemTts
+  crustagent-audio/    # sound-effect playback (rodio) — the character's embedded WAVs
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
   crustagent-render/   # viewer: tight character window + separate balloon window
 ```
@@ -53,7 +54,9 @@ loop {
 
 The `Agent` runs a serial action queue (`show`/`hide`/`play`/`speak`/`move_to`/
 `gesture_at`/`wait`), auto-idles when the queue drains, and hands back a composited RGBA
-frame + balloon + position each tick — windowing- and audio-agnostic.
+frame + balloon + position each tick — windowing- and audio-agnostic. Sound effects (the
+character's per-frame embedded WAVs) fire through a pluggable `AudioSink` (`set_audio_sink`;
+`crustagent-audio` provides a rodio backend).
 
 Speech goes through a pluggable `TtsEngine` (`crustagent-tts`): the default `TimedTts` is
 silent and paces the balloon/mouth on a timer, while `SystemTts` plays real audio on

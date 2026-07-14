@@ -89,6 +89,21 @@ struct TrackFrame {
     dur_ms: u32,
 }
 
+/// Plays a character's embedded sound effects (raw WAV bytes from the file). Implemented
+/// by a host audio backend (e.g. `crustagent-audio`'s rodio sink); the default is silent.
+pub trait AudioSink {
+    /// Play a standalone WAV clip (fire-and-forget; clips may overlap).
+    fn play(&mut self, wav: &[u8]);
+    /// Stop any playing clips.
+    fn stop(&mut self) {}
+}
+
+/// A no-op [`AudioSink`] — sound effects are silently dropped.
+pub struct NullSink;
+impl AudioSink for NullSink {
+    fn play(&mut self, _wav: &[u8]) {}
+}
+
 /// An embedded, drivable character.
 pub struct Agent {
     file: AcsFile,
@@ -114,6 +129,10 @@ pub struct Agent {
     speak_words: Vec<String>,
     speak_shown: usize,
     speak_mouth: Option<MouthOverlay>,
+
+    // sound effects
+    audio: Box<dyn AudioSink>,
+    last_track_index: Option<usize>,
 }
 
 impl Agent {
@@ -149,6 +168,8 @@ impl Agent {
             speak_words: Vec::new(),
             speak_shown: 0,
             speak_mouth: None,
+            audio: Box::new(NullSink),
+            last_track_index: None,
         }
     }
 
@@ -156,6 +177,11 @@ impl Agent {
     /// [`default_engine`] for real audio where a backend exists.
     pub fn set_tts(&mut self, engine: Box<dyn TtsEngine>) {
         self.tts = engine;
+    }
+
+    /// Set the sound-effect audio sink (default is silent [`NullSink`]).
+    pub fn set_audio_sink(&mut self, sink: Box<dyn AudioSink>) {
+        self.audio = sink;
     }
 
     /// The parsed character file.
@@ -277,6 +303,11 @@ impl Agent {
                     self.next();
                 }
             }
+        }
+
+        // Play the current frame's embedded sound effect on entry.
+        if self.visible {
+            self.fire_frame_sound();
         }
     }
 
@@ -469,6 +500,7 @@ impl Agent {
         self.track = track;
         self.track_loops = loops;
         self.track_elapsed_ms = 0;
+        self.last_track_index = None;
     }
 
     fn build_rest_track(&mut self) {
@@ -488,11 +520,13 @@ impl Agent {
         self.track_total_ms = 1000;
         self.track_loops = false;
         self.track_elapsed_ms = 0;
+        self.last_track_index = None;
     }
 
     // -- render read-back ----------------------------------------------------
 
-    fn track_frame(&self) -> Option<&TrackFrame> {
+    /// Index into `track` of the entry active at the current time.
+    fn current_track_index(&self) -> Option<usize> {
         if self.track.is_empty() {
             return None;
         }
@@ -502,13 +536,44 @@ impl Agent {
             self.track_elapsed_ms.min(self.track_total_ms.saturating_sub(1))
         };
         let mut acc = 0;
-        for f in &self.track {
+        for (i, f) in self.track.iter().enumerate() {
             acc += f.dur_ms;
             if t < acc {
-                return Some(f);
+                return Some(i);
             }
         }
-        self.track.last()
+        Some(self.track.len() - 1)
+    }
+
+    fn track_frame(&self) -> Option<&TrackFrame> {
+        self.current_track_index().map(|i| &self.track[i])
+    }
+
+    /// Play the sound effect of the frame we just entered (once per frame entry).
+    fn fire_frame_sound(&mut self) {
+        let cur = self.current_track_index();
+        if cur == self.last_track_index {
+            return;
+        }
+        self.last_track_index = cur;
+        let Some(i) = cur else { return };
+        let (anim, frame) = {
+            let tf = &self.track[i];
+            (tf.anim, tf.frame)
+        };
+        let snd = self
+            .file
+            .animations
+            .get(anim)
+            .and_then(|a| a.frames.get(frame))
+            .map(|f| f.sound_ndx);
+        if let Some(snd) = snd {
+            if snd >= 0 {
+                if let Some(wav) = self.file.sound(snd as usize) {
+                    self.audio.play(wav);
+                }
+            }
+        }
     }
 
     /// The mouth overlay to composite now — driven by the TTS engine's viseme/mouth

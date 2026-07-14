@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/crustagent-format", "crates/crustagent-core", "crates/crustagent-gif", "crates/crustagent-render", "crates/crustagent", "crates/crustagent-tts"]
+members = ["crates/crustagent-format", "crates/crustagent-core", "crates/crustagent-gif", "crates/crustagent-render", "crates/crustagent", "crates/crustagent-tts", "crates/crustagent-audio"]
 
 [workspace.package]
 version = "0.1.0"

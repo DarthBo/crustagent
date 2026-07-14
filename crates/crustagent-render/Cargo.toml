@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 crustagent = { path = "../crustagent" }
 crustagent-format = { path = "../crustagent-format" }
+crustagent-audio = { path = "../crustagent-audio" }
 winit = "0.30"
 wgpu = "22"
 pollster = "0.3"

@@ -322,6 +322,10 @@ fn main() {
         std::process::exit(1);
     });
 
+    // Play the character's embedded sound effects (if an audio device is available).
+    if let Some(sink) = crustagent_audio::RodioSink::new() {
+        agent.set_audio_sink(Box::new(sink));
+    }
     if args.iter().any(|a| a == "--say") {
         agent.set_tts(crustagent::default_engine());
     }
