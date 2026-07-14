@@ -346,7 +346,7 @@ impl App {
             let mut canvas = paint::Canvas::new(&mut self.balloon_scratch, w, h);
             let style = balloon_paint(&self.agent, bv.kind);
             // The tail is centered on the window, which is sized to fit the balloon.
-            canvas.balloon(&bv.layout.lines, below, &style, self.font.as_ref());
+            canvas.balloon(&bv.layout.lines, below, &style, self.font.as_ref(), self.font_scale);
         }
     }
 }
@@ -536,8 +536,14 @@ impl ApplicationHandler for App {
             if let Some(scale) = self.char_window.as_ref().map(|w| w.scale_factor() as f32) {
                 self.ensure_font(scale);
             }
-            let (bw, bh) =
-                paint::balloon_size(self.font.as_ref(), &bv.full.lines, bv.full.cols, bv.full.rows);
+            let (bw, bh) = paint::balloon_size(
+                self.font.as_ref(),
+                &bv.full.lines,
+                bv.full.cols,
+                bv.full.rows,
+                self.font_scale,
+                matches!(bv.kind, BalloonKind::Think),
+            );
             self.ensure_balloon_window(el, bw, bh);
             self.reposition_balloon();
             if let Some(win) = &self.balloon_window {
@@ -568,14 +574,34 @@ fn main() {
             text: [0x10, 0x10, 0x10],
             think,
         };
-        let lines = vec!["Real TrueType balloon text!".to_string()];
-        let (w, h) = paint::balloon_size(font.as_ref(), &lines, lines[0].len(), 1);
+        let render = |think: bool, text: &str| -> (Vec<u8>, u32, u32) {
+            let lines = vec![text.to_string()];
+            let (w, h) = paint::balloon_size(font.as_ref(), &lines, text.len(), 1, 2.0, think);
+            let mut buf = vec![0x50u8; (w * h * 4) as usize];
+            for px in buf.chunks_exact_mut(4) {
+                px[3] = 0xFF;
+            }
+            let mut c = paint::Canvas::new(&mut buf, w, h);
+            c.balloon(&lines, false, &style(think), font.as_ref(), 2.0);
+            (buf, w, h)
+        };
+        let (sb, sw, sh) = render(false, "Speech balloon");
+        let (tb, tw, th) = render(true, "Thought balloon");
+        let gap = 12u32;
+        let (w, h) = (sw.max(tw), sh + gap + th);
         let mut buf = vec![0x50u8; (w * h * 4) as usize];
         for px in buf.chunks_exact_mut(4) {
             px[3] = 0xFF;
         }
-        let mut canvas = paint::Canvas::new(&mut buf, w, h);
-        canvas.balloon(&lines, false, &style(false), font.as_ref());
+        let mut blit = |src: &[u8], sw: u32, sh: u32, oy: u32| {
+            for y in 0..sh {
+                let d = (((y + oy) * w) * 4) as usize;
+                let s = (y * sw * 4) as usize;
+                buf[d..d + (sw * 4) as usize].copy_from_slice(&src[s..s + (sw * 4) as usize]);
+            }
+        };
+        blit(&sb, sw, sh, 0);
+        blit(&tb, tw, th, sh + gap);
         std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
         println!("wrote {out} ({w}x{h}, font: {})", if font.is_some() { "system" } else { "8x8 fallback" });
         return;

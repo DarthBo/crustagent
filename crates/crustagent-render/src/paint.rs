@@ -116,12 +116,42 @@ pub const MENU_SCALE: i32 = 2;
 pub const MENU_ROW_H: i32 = 8 * MENU_SCALE + 6;
 const PAD: i32 = 6;
 const TAIL_LEN: i32 = 9;
+/// Thought-balloon bubble radii (at scale 1.0), largest nearest the body.
+const THINK_BUBBLES: [f32; 3] = [4.5, 3.0, 2.0];
+
+/// Padding around the text, scaled for the display.
+fn pad_px(scale: f32) -> i32 {
+    (PAD as f32 * scale).round().max(PAD as f32) as i32
+}
+
+/// Vertical space reserved for the tail: a short spike for speech, a longer trail of
+/// (scaled) bubbles for thought.
+fn tail_px(scale: f32, think: bool) -> i32 {
+    if think {
+        let gap = (2.0 * scale).round() as i32;
+        THINK_BUBBLES
+            .iter()
+            .map(|&r| gap + 2 * (r * scale).round() as i32)
+            .sum::<i32>()
+            + gap
+    } else {
+        (TAIL_LEN as f32 * scale).round().max(TAIL_LEN as f32) as i32
+    }
+}
 
 /// The window size (physical px) needed to hold a balloon, including padding and the tail.
 /// Sized to the widest measured `lines`, but at least `min_cols` characters wide (so a
-/// fixed-size box with blank placeholder lines still reserves its full width). With no
-/// `font`, falls back to the 8x8 bitmap metrics.
-pub fn balloon_size(font: Option<&Font>, lines: &[String], min_cols: usize, rows: usize) -> (u32, u32) {
+/// fixed-size box with blank placeholder lines still reserves its full width). `scale` is
+/// the display scale factor (matches the DPI-sized font); `think` reserves the taller
+/// thought-bubble tail. With no `font`, falls back to the 8x8 bitmap metrics.
+pub fn balloon_size(
+    font: Option<&Font>,
+    lines: &[String],
+    min_cols: usize,
+    rows: usize,
+    scale: f32,
+    think: bool,
+) -> (u32, u32) {
     let (char_w, line_h) = match font {
         Some(f) => (f.avg_advance(), f.line_height()),
         None => (8 * BSCALE, 8 * BSCALE),
@@ -134,10 +164,11 @@ pub fn balloon_size(font: Option<&Font>, lines: &[String], min_cols: usize, rows
         })
         .max()
         .unwrap_or(0);
+    let pad = pad_px(scale);
     let text_w = measured.max(min_cols as i32 * char_w);
     let text_h = rows.max(1) as i32 * line_h;
-    let bw = text_w + PAD * 2 + 2;
-    let bh = text_h + PAD * 2 + TAIL_LEN + 2;
+    let bw = text_w + pad * 2 + 2;
+    let bh = text_h + pad * 2 + tail_px(scale, think) + 2;
     (bw.max(16) as u32, bh.max(16) as u32)
 }
 
@@ -294,11 +325,12 @@ impl<'a> Canvas<'a> {
         below: bool,
         style: &BalloonPaint,
         font: Option<&Font>,
+        scale: f32,
     ) {
         let (bg, border, text) = (style.bg, style.border, style.text);
-        let pad = PAD;
-        let tail_len = TAIL_LEN;
-        let tail_half = 6;
+        let pad = pad_px(scale);
+        let tail_len = tail_px(scale, style.think);
+        let tail_half = (6.0 * scale).round().max(3.0) as i32;
 
         // The body fills the window minus the tail strip.
         let bx = 0;
@@ -307,18 +339,22 @@ impl<'a> Canvas<'a> {
         let bh = (self.h - tail_len).max(1);
         let tip_x = self.w / 2;
         let attach_y = if below { by } else { by + bh - 1 };
+        // Direction from the body edge toward the character (down if the balloon is above).
+        let dir = if below { -1 } else { 1 };
 
         self.fill_rect(bx, by, bw, bh, bg);
 
         if style.think {
-            // Full border, then a trail of shrinking bubbles toward the tip.
+            // Full border, then a descending trail of shrinking, separated bubbles.
             self.stroke_rect(bx, by, bw, bh, border);
-            let tip_y = if below { 0 } else { self.h - 1 };
-            let tcx = tip_x.clamp(bx + 8, bx + bw - 8);
-            for (t, r) in [(0.32f32, 5i32), (0.62, 4), (0.88, 3)] {
-                let cx = tcx + ((tip_x - tcx) as f32 * t) as i32;
-                let cy = attach_y + ((tip_y - attach_y) as f32 * t) as i32;
-                self.disc(cx, cy, r, bg, border);
+            let gap = (2.0 * scale).round() as i32;
+            let tcx = tip_x.clamp(bx + tail_len, bx + bw - tail_len);
+            let mut edge = attach_y;
+            for &base in &THINK_BUBBLES {
+                let r = (base * scale).round().max(1.0) as i32;
+                edge += dir * (gap + r);
+                self.disc(tcx, edge, r, bg, border);
+                edge += dir * r;
             }
         } else {
             // Pointed tail, merged into the body with a border gap on the attach edge.
@@ -326,7 +362,7 @@ impl<'a> Canvas<'a> {
             let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
             for row in 0..=tail_len {
                 let half = tail_half - row * tail_half / tail_len;
-                let y = if below { attach_y - row } else { attach_y + row };
+                let y = attach_y + dir * row;
                 self.fill_rect(tcx - half, y, half * 2 + 1, 1, bg);
                 self.put(tcx - half, y, border);
                 self.put(tcx + half, y, border);
