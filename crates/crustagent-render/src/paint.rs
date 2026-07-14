@@ -301,6 +301,26 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Fill a rectangle with rounded corners of radius `r`.
+    fn fill_round_rect(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, rgb: [u8; 3]) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let r = r.clamp(0, w.min(h) / 2);
+        for row in 0..h {
+            let inset = if r > 0 && row < r {
+                let dy = (r - row) as f32;
+                (r as f32 - ((r * r) as f32 - dy * dy).max(0.0).sqrt()).round() as i32
+            } else if r > 0 && row >= h - r {
+                let dy = (row - (h - 1 - r)) as f32;
+                (r as f32 - ((r * r) as f32 - dy * dy).max(0.0).sqrt()).round() as i32
+            } else {
+                0
+            };
+            self.fill_rect(x + inset, y + row, (w - 2 * inset).max(0), 1, rgb);
+        }
+    }
+
     /// A filled disc of radius `r` at `(cx, cy)` with a one-pixel border ring.
     fn disc(&mut self, cx: i32, cy: i32, r: i32, fill: [u8; 3], border: [u8; 3]) {
         for dy in -r..=r {
@@ -342,23 +362,26 @@ impl<'a> Canvas<'a> {
         // Direction from the body edge toward the character (down if the balloon is above).
         let dir = if below { -1 } else { 1 };
 
-        self.fill_rect(bx, by, bw, bh, bg);
+        // Rounded body: a border-colored rounded rect with a 1px-smaller bg rect inside,
+        // leaving a clean 1px rounded outline.
+        let r = (6.0 * scale).round() as i32;
+        self.fill_round_rect(bx, by, bw, bh, r, border);
+        self.fill_round_rect(bx + 1, by + 1, bw - 2, bh - 2, (r - 1).max(0), bg);
 
         if style.think {
-            // Full border, then a descending trail of shrinking, separated bubbles.
-            self.stroke_rect(bx, by, bw, bh, border);
+            // A descending trail of shrinking, separated bubbles.
             let gap = (2.0 * scale).round() as i32;
             let tcx = tip_x.clamp(bx + tail_len, bx + bw - tail_len);
             let mut edge = attach_y;
             for &base in &THINK_BUBBLES {
-                let r = (base * scale).round().max(1.0) as i32;
-                edge += dir * (gap + r);
-                self.disc(tcx, edge, r, bg, border);
-                edge += dir * r;
+                let rr = (base * scale).round().max(1.0) as i32;
+                edge += dir * (gap + rr);
+                self.disc(tcx, edge, rr, bg, border);
+                edge += dir * rr;
             }
         } else {
-            // Pointed tail, merged into the body with a border gap on the attach edge.
-            let far_y = if below { by + bh - 1 } else { by };
+            // Pointed tail, filled from the attach edge so it opens into the rounded body;
+            // its two slanted sides are outlined.
             let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
             for row in 0..=tail_len {
                 let half = tail_half - row * tail_half / tail_len;
@@ -366,16 +389,6 @@ impl<'a> Canvas<'a> {
                 self.fill_rect(tcx - half, y, half * 2 + 1, 1, bg);
                 self.put(tcx - half, y, border);
                 self.put(tcx + half, y, border);
-            }
-            for y in by..by + bh {
-                self.put(bx, y, border);
-                self.put(bx + bw - 1, y, border);
-            }
-            for x in bx..bx + bw {
-                self.put(x, far_y, border);
-                if x < tcx - tail_half || x > tcx + tail_half {
-                    self.put(x, attach_y, border);
-                }
             }
         }
 
