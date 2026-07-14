@@ -22,7 +22,7 @@ use crustagent::{Agent, Request};
 use present::{Presenter, SoftPresenter, WgpuPresenter};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -155,9 +155,11 @@ impl ApplicationHandler for App {
             .default_name()
             .map(|n| n.name.clone())
             .unwrap_or_default();
+        // Size in *physical* pixels: we composite in physical pixels (the surface's real
+        // size), so a logical size would double the window on HiDPI and leave dead space.
         let mut attrs = Window::default_attributes()
             .with_title(format!("crustagent — {name}"))
-            .with_inner_size(LogicalSize::new(win_w, win_h));
+            .with_inner_size(PhysicalSize::new(win_w as u32, win_h as u32));
         if self.float {
             attrs = attrs
                 .with_decorations(false)
