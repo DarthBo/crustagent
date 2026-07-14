@@ -41,8 +41,12 @@ pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent};
 /// A high-level request enqueued on the [`Agent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    Show,
-    Hide,
+    /// Make the character visible. `fast` skips the SHOWING animation (appear instantly) —
+    /// use it when the entrance is handled by a following animation that starts empty.
+    Show { fast: bool },
+    /// Hide the character. `fast` skips the HIDING animation (vanish instantly) — use it
+    /// when the exit was handled by a preceding animation that ends empty.
+    Hide { fast: bool },
     /// Play a named gesture (its full base + `…Continued` + `…Return`).
     Play(String),
     /// Show a balloon and pace the words (no audio yet).
@@ -226,11 +230,21 @@ impl Agent {
     pub fn request(&mut self, req: Request) {
         self.queue.push_back(req);
     }
+    /// Show the character, playing its SHOWING animation.
     pub fn show(&mut self) {
-        self.request(Request::Show);
+        self.request(Request::Show { fast: false });
     }
+    /// Show the character instantly (no SHOWING animation).
+    pub fn show_fast(&mut self) {
+        self.request(Request::Show { fast: true });
+    }
+    /// Hide the character, playing its HIDING animation.
     pub fn hide(&mut self) {
-        self.request(Request::Hide);
+        self.request(Request::Hide { fast: false });
+    }
+    /// Hide the character instantly (no HIDING animation).
+    pub fn hide_fast(&mut self) {
+        self.request(Request::Hide { fast: true });
     }
     pub fn play(&mut self, animation: impl Into<String>) {
         self.request(Request::Play(animation.into()));
@@ -332,12 +346,24 @@ impl Agent {
 
     fn start(&mut self, req: Request) {
         match req {
-            Request::Show => {
+            Request::Show { fast } => {
                 self.visible = true;
-                self.start_state("SHOWING", false, Activity::Gesture);
+                if fast {
+                    // Appear instantly; proceed straight to the next request (e.g. a
+                    // greeting that starts empty) or to idling — no in-between frame.
+                    self.next();
+                } else {
+                    self.start_state("SHOWING", false, Activity::Gesture);
+                }
             }
-            Request::Hide => {
-                self.start_state("HIDING", false, Activity::Hiding);
+            Request::Hide { fast } => {
+                if fast {
+                    self.visible = false;
+                    self.activity = Activity::Hidden;
+                    self.next();
+                } else {
+                    self.start_state("HIDING", false, Activity::Hiding);
+                }
             }
             Request::Play(name) => {
                 let frames = self.build_gesture_frames(&name, false);

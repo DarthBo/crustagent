@@ -37,7 +37,7 @@ const MENU_MAX_H: i32 = 640; // tall menus scroll instead of growing past this
 /// All actions: play any of the character's animations (sorted), plus Speak and Hide.
 fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
     let mut items = vec![
-        ("Hide".to_string(), Request::Hide),
+        ("Hide".to_string(), Request::Hide { fast: false }),
         (
             "Speak".to_string(),
             Request::Speak("Hello from crustagent!".to_string()),
@@ -49,6 +49,25 @@ fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
         items.push((name.clone(), Request::Play(name)));
     }
     items
+}
+
+/// Does `name`'s first (`first == true`) or last frame composite to nothing? Such a frame
+/// means the animation appears-from / vanishes-to empty, so it can *be* the entrance/exit —
+/// letting us skip the separate Show/Hide animation that would otherwise flash the
+/// character in and back out.
+fn frame_empty(agent: &Agent, name: &str, first: bool) -> bool {
+    let file = agent.file();
+    let Some(anim) = file.animation(name) else {
+        return false;
+    };
+    let frame = if first {
+        anim.frames.first()
+    } else {
+        anim.frames.last()
+    };
+    let Some(frame) = frame else { return false };
+    frame.images.is_empty()
+        || matches!(file.composite_frame(frame, None), Ok(img) if img.is_fully_transparent())
 }
 
 fn make_window(el: &ActiveEventLoop, w: u32, h: u32, title: &str) -> Arc<Window> {
@@ -201,13 +220,23 @@ impl App {
         self.quitting = true;
         self.close_menu();
         self.agent.stop();
-        for farewell in ["Goodbye", "Wave"] {
-            if self.agent.file().animation(farewell).is_some() {
-                self.agent.play(farewell);
-                break;
+        // Wave goodbye, then hide. If the farewell ends on an empty frame it *is* the exit,
+        // so hide instantly (no HIDING animation) — otherwise the character would vanish
+        // via Goodbye, then reappear for Hide and blink out again.
+        let farewell = ["Goodbye", "Wave"]
+            .into_iter()
+            .find(|f| self.agent.file().animation(f).is_some());
+        match farewell {
+            Some(f) if frame_empty(&self.agent, f, false) => {
+                self.agent.play(f);
+                self.agent.hide_fast();
             }
+            Some(f) => {
+                self.agent.play(f);
+                self.agent.hide();
+            }
+            None => self.agent.hide(),
         }
-        self.agent.hide();
         self.quit_deadline = Some(Instant::now() + Duration::from_secs(6));
     }
 
@@ -479,7 +508,6 @@ fn main() {
         agent.set_tts(crustagent::default_engine());
     }
 
-    agent.show();
     if let Some(name) = positional.get(1) {
         if agent.file().animation(name).is_none() {
             eprintln!("no animation {name:?}. Available:");
@@ -488,14 +516,26 @@ fn main() {
             }
             std::process::exit(1);
         }
+        agent.show();
         agent.play((*name).clone());
     } else {
-        // Open with a greeting (then it idles).
-        for greet in ["Greeting", "Greet"] {
-            if agent.file().animation(greet).is_some() {
-                agent.play(greet);
-                break;
+        // Open with the greeting. If the greeting appears from an empty frame it *is* the
+        // entrance, so show instantly (no SHOWING animation) — otherwise the character
+        // would flash in via Show, blink to empty, then reappear. If there's no greeting,
+        // fall back to the normal Show animation.
+        let greeting = ["Greeting", "Greet"]
+            .into_iter()
+            .find(|g| agent.file().animation(g).is_some());
+        match greeting {
+            Some(g) if frame_empty(&agent, g, true) => {
+                agent.show_fast();
+                agent.play(g);
             }
+            Some(g) => {
+                agent.show();
+                agent.play(g);
+            }
+            None => agent.show(),
         }
     }
 
