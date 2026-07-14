@@ -8,10 +8,11 @@
 //!   [`AnimationSequence`], and build return-to-neutral exit sequences.
 //! - [`player`] — drive a sequence against a monotonic clock (looping, completion).
 //! - [`character`] — name/state → animation resolution over a parsed character file.
+//! - [`idle`] — escalating auto-idle animation selection.
 //! - [`text`] — parse `Speak`/`Think` markup into display words + a speech directive stream.
 //! - [`rng`] — deterministic, injectable branch randomness.
 //!
-//! Planned: the action queue, idle escalation, and move interpolation.
+//! Planned: the action queue and move interpolation.
 //!
 //! ```
 //! use crustagent_core::{sequence_animation, Player, SplitMix64};
@@ -27,12 +28,14 @@
 //! ```
 
 pub mod character;
+pub mod idle;
 pub mod player;
 pub mod rng;
 pub mod sequence;
 pub mod text;
 
 pub use character::Character;
+pub use idle::IdleDirector;
 pub use player::Player;
 pub use rng::{BranchRng, SplitMix64};
 pub use sequence::{
