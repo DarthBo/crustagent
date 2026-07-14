@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 crustagent-format = { path = "../crustagent-format" }
+tts = "0.26.3"

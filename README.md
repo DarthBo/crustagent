@@ -26,7 +26,7 @@ crates/
   crustagent/          # embedding API: Agent + serial action queue (start here to embed)
   crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACF header)
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
-  crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SayTts
+  crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SystemTts
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
   crustagent-render/   # viewer: tight character window + separate balloon window
 ```
@@ -56,13 +56,14 @@ The `Agent` runs a serial action queue (`show`/`hide`/`play`/`speak`/`move_to`/
 frame + balloon + position each tick — windowing- and audio-agnostic.
 
 Speech goes through a pluggable `TtsEngine` (`crustagent-tts`): the default `TimedTts` is
-silent and paces the balloon/mouth on a timer, while `SayTts` (macOS) plays real audio via
-`say`. Engines emit a `VoiceEvent` stream (word boundaries → balloon reveal, visemes →
-mouth) that the `Agent` consumes each tick.
+silent and paces the balloon/mouth on a timer, while `SystemTts` plays real audio on
+Windows/macOS/Linux via the [`tts`](https://crates.io/crates/tts) crate (WinRT/SAPI,
+AVSpeech, speech-dispatcher). Engines emit a `VoiceEvent` stream (word boundaries →
+balloon reveal, visemes → mouth) that the `Agent` consumes each tick. (Linux needs
+`speech-dispatcher` installed for audio; it degrades to silent otherwise.)
 
-Planned: word/viseme-accurate TTS backends (SAPI/WinRT, speech-dispatcher, a portable
-engine) for true lip-sync, `.aca` bodies for ACF + the ACS 1.5 (OLE2) format, and a
-host-defined command API for the pop-up menu.
+Planned: a viseme-accurate/offline TTS backend (e.g. Piper) for true lip-sync, `.aca`
+bodies for ACF + the ACS 1.5 (OLE2) format, and a host-defined command API for the menu.
 
 ## `crustagent-format` — status
 

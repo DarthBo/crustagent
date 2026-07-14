@@ -7,9 +7,10 @@
 //! threads or callbacks needed), which keeps everything deterministic and testable.
 //!
 //! [`TimedTts`] is the portable default: **no audio**, it just paces the events on a
-//! timer (the classic silent-balloon behavior). Real audio backends implement the same
-//! trait; [`SayTts`] (macOS) plays actual speech via the `say` command while reusing the
-//! timed event stream for lip/word sync.
+//! timer (the classic silent-balloon behavior). [`SystemTts`] adds real audio on
+//! Windows/macOS/Linux via the [`tts`] crate (WinRT/SAPI, AVSpeech, speech-dispatcher),
+//! reusing the timed event stream for word/mouth pacing since those engines don't expose
+//! visemes uniformly.
 
 use crustagent_format::MouthOverlay;
 
@@ -140,26 +141,39 @@ impl TtsEngine for TimedTts {
     }
 }
 
-/// A real-audio backend for macOS: plays speech with the `say` command while the timed
-/// engine supplies the word/mouth events (they aren't perfectly synced to `say`'s actual
-/// rate — see the crate docs — but you hear the character talk).
-#[cfg(target_os = "macos")]
-#[derive(Default)]
-pub struct SayTts {
+/// A real-audio backend using the cross-platform [`tts`] crate (WinRT/SAPI on Windows,
+/// `AVSpeechSynthesizer` on macOS, speech-dispatcher on Linux). Audio plays through the
+/// OS engine while the timed engine supplies the word/mouth events — those engines don't
+/// expose visemes uniformly, so word reveal and the mouth are paced on the timer (not
+/// tightly synced to the actual speaking rate; a viseme-capable backend would fix that).
+///
+/// If no system engine is available (e.g. speech-dispatcher not installed on Linux), it
+/// degrades gracefully to silent timed playback.
+pub struct SystemTts {
+    engine: Option<tts::Tts>,
     timed: TimedTts,
-    child: Option<std::process::Child>,
 }
 
-#[cfg(target_os = "macos")]
-impl TtsEngine for SayTts {
+impl Default for SystemTts {
+    fn default() -> Self {
+        SystemTts {
+            engine: tts::Tts::default().ok(),
+            timed: TimedTts::new(),
+        }
+    }
+}
+
+impl TtsEngine for SystemTts {
     fn speak(&mut self, text: &str, word_count: usize) {
         self.stop();
-        self.child = std::process::Command::new("say").arg(text).spawn().ok();
+        if let Some(engine) = &mut self.engine {
+            let _ = engine.speak(text, true); // interrupt = replace anything in progress
+        }
         self.timed.speak(text, word_count);
     }
     fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+        if let Some(engine) = &mut self.engine {
+            let _ = engine.stop();
         }
         self.timed.stop();
     }
@@ -171,16 +185,9 @@ impl TtsEngine for SayTts {
     }
 }
 
-/// The best available default engine: real audio where we have a backend, else silent.
+/// The default engine: real system audio via [`SystemTts`] (silent fallback if none).
 pub fn default_engine() -> Box<dyn TtsEngine> {
-    #[cfg(target_os = "macos")]
-    {
-        Box::new(SayTts::default())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Box::new(TimedTts::new())
-    }
+    Box::new(SystemTts::default())
 }
 
 #[cfg(test)]
