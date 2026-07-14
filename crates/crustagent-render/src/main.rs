@@ -87,6 +87,10 @@ struct App {
 
     cursor: (i32, i32),
     last: Instant,
+
+    // graceful shutdown: play Goodbye + Hide before exiting
+    quitting: bool,
+    quit_deadline: Option<Instant>,
 }
 
 impl App {
@@ -188,6 +192,25 @@ impl App {
         }
     }
 
+    /// Begin a graceful shutdown: wave Goodbye, then Hide; the event loop exits once the
+    /// character is hidden (or after a safety timeout).
+    fn begin_quit(&mut self) {
+        if self.quitting {
+            return;
+        }
+        self.quitting = true;
+        self.close_menu();
+        self.agent.stop();
+        for farewell in ["Goodbye", "Wave"] {
+            if self.agent.file().animation(farewell).is_some() {
+                self.agent.play(farewell);
+                break;
+            }
+        }
+        self.agent.hide();
+        self.quit_deadline = Some(Instant::now() + Duration::from_secs(6));
+    }
+
     fn menu_hover(&self) -> Option<usize> {
         let (cx, cy) = self.menu_cursor;
         if cx < 0 || cy < 0 || cx >= self.menu_dim.0 as i32 || cy >= self.menu_dim.1 as i32 {
@@ -255,11 +278,24 @@ impl ApplicationHandler for App {
         let is_menu = self.menu_window.as_ref().is_some_and(|w| w.id() == id);
 
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                if self.quitting {
+                    el.exit();
+                } else {
+                    self.begin_quit();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::Escape) if is_menu => self.close_menu(),
-                    PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) => el.exit(),
+                    PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) => {
+                        // First press: play Goodbye and hide; press again to force-quit.
+                        if self.quitting {
+                            el.exit();
+                        } else {
+                            self.begin_quit();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -362,6 +398,16 @@ impl ApplicationHandler for App {
         self.last = now;
         self.agent.update(dt);
 
+        // Once Goodbye + Hide finish (character no longer visible), or on timeout, exit.
+        if self.quitting {
+            let hidden = !self.agent.is_visible();
+            let timed_out = self.quit_deadline.is_some_and(|d| now >= d);
+            if hidden || timed_out {
+                el.exit();
+                return;
+            }
+        }
+
         // Balloon window: size once per phrase, keep it, show/hide as speech starts/stops.
         if let Some(bv) = self.agent.balloon() {
             let (bw, bh) = paint::balloon_size(bv.full.cols, bv.full.rows);
@@ -443,6 +489,14 @@ fn main() {
             std::process::exit(1);
         }
         agent.play((*name).clone());
+    } else {
+        // Open with a greeting (then it idles).
+        for greet in ["Greeting", "Greet"] {
+            if agent.file().animation(greet).is_some() {
+                agent.play(greet);
+                break;
+            }
+        }
     }
 
     let name = agent.file().default_name().map(|n| n.name.clone()).unwrap_or_default();
@@ -480,6 +534,8 @@ fn main() {
         menu_dim: (0, 0),
         cursor: (0, 0),
         last: Instant::now(),
+        quitting: false,
+        quit_deadline: None,
     };
 
     let event_loop = EventLoop::new().expect("event loop");
