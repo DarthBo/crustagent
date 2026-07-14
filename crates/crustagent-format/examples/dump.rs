@@ -63,6 +63,36 @@ fn main() {
     println!("Images    : {}", chr.image_count());
     println!("Sounds    : {}", chr.sound_count());
 
+    // Frames referencing sounds, and the WAV format of each sound.
+    let sound_frames: usize = chr
+        .animations
+        .iter()
+        .flat_map(|a| &a.frames)
+        .filter(|f| f.sound_ndx >= 0)
+        .count();
+    println!("            {sound_frames} frames reference a sound");
+    for i in 0..chr.sound_count() {
+        if let Some(wav) = chr.sound(i) {
+            // RIFF: "fmt " chunk at offset 12; wFormatTag is 2 bytes at offset 20.
+            let tag = if wav.len() >= 22 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" {
+                u16::from_le_bytes([wav[20], wav[21]])
+            } else {
+                0xFFFF
+            };
+            let name = match tag {
+                1 => "PCM",
+                2 => "MS-ADPCM",
+                6 => "A-law",
+                7 => "mu-law",
+                17 => "IMA-ADPCM",
+                49 => "GSM 6.10",
+                0xFFFF => "not-RIFF",
+                _ => "other",
+            };
+            println!("  sound {i:2}: {:6} bytes  fmt=0x{tag:04X} ({name})", wav.len());
+        }
+    }
+
     // Try decoding every image to validate the decompressor end-to-end.
     let mut ok = 0usize;
     let mut failed = 0usize;
