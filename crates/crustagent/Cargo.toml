@@ -1,0 +1,13 @@
+[package]
+name = "crustagent"
+description = "Embed classic Microsoft Agent characters in modern Rust apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crustagent-format = { path = "../crustagent-format" }
+crustagent-core = { path = "../crustagent-core" }
