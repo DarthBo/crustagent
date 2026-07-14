@@ -105,7 +105,8 @@ Implemented:
   words and a neutral speech-directive stream (all 23 tags, `\Map` dual text, `\Mrk`
   bookmarks, `\\`/`\"` escaping).
 
-Not yet: action queue, idle escalation, move interpolation.
+The action queue, idle escalation, and move interpolation that drive these live one layer
+up, in the `crustagent` (`Agent`) crate.
 
 ## Try it
 
