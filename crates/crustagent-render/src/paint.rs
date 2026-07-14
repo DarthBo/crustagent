@@ -91,7 +91,8 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw a speech balloon centered horizontally near the top, with a downward tail.
+    /// Draw a speech balloon centered horizontally near the top, with a downward tail
+    /// that merges into the body (no border line cutting across the join).
     pub fn balloon(&mut self, lines: &[String]) {
         let bg = [0xFF, 0xFF, 0xE8];
         let border = [0x40, 0x40, 0x40];
@@ -108,16 +109,35 @@ impl<'a> Canvas<'a> {
         let bx = (self.w - bw) / 2;
         let by = 6;
 
+        let tail_half = 6;
+        let tail_len = 9;
+        let bottom = by + bh - 1;
+        let tip_x = (bx + bw / 2).clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
+
+        // body + tail fill (tail overlaps the bottom edge so it connects seamlessly)
         self.fill_rect(bx, by, bw, bh, bg);
-        self.stroke_rect(bx, by, bw, bh, border);
-        for (i, line) in lines.iter().enumerate() {
-            self.text(bx + pad, by + pad + i as i32 * 8 * BSCALE, BSCALE, line, text);
+        for row in 0..=tail_len {
+            let half = tail_half - row * tail_half / tail_len;
+            let y = bottom + row;
+            self.fill_rect(tip_x - half, y, half * 2 + 1, 1, bg);
+            self.put(tip_x - half, y, border); // slanted left edge
+            self.put(tip_x + half, y, border); // slanted right edge
         }
 
-        let tip_x = self.w / 2;
-        for row in 0..10 {
-            let half = 6 - row.min(6);
-            self.fill_rect(tip_x - half, by + bh + row, half * 2 + 1, 1, bg);
+        // outline: top + sides, and the bottom edge *except* the tail gap
+        for x in bx..bx + bw {
+            self.put(x, by, border);
+            if x < tip_x - tail_half || x > tip_x + tail_half {
+                self.put(x, bottom, border);
+            }
+        }
+        for y in by..by + bh {
+            self.put(bx, y, border);
+            self.put(bx + bw - 1, y, border);
+        }
+
+        for (i, line) in lines.iter().enumerate() {
+            self.text(bx + pad, by + pad + i as i32 * 8 * BSCALE, BSCALE, line, text);
         }
     }
 

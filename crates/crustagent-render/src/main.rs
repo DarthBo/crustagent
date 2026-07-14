@@ -12,6 +12,7 @@
 //! otherwise a `softbuffer` window draws on a transparency checkerboard.
 
 mod paint;
+mod png;
 mod present;
 
 use std::sync::Arc;
@@ -241,6 +242,22 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let float = args.iter().any(|a| a == "--float");
     let dry_run = args.iter().any(|a| a == "--dry-run");
+
+    // Debug: render a sample balloon to a PNG and exit (for headless visual checks).
+    if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
+        let (w, h) = (420u32, 120u32);
+        let mut buf = vec![0x50u8; (w * h * 4) as usize]; // opaque dark-gray bg
+        for px in buf.chunks_exact_mut(4) {
+            px[3] = 0xFF;
+        }
+        let mut canvas = paint::Canvas::new(&mut buf, w, h);
+        canvas.balloon(&["Hello from crustagent!".to_string()]);
+        std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
+        println!("wrote {out}");
+        return;
+    }
+
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
     let Some(path) = positional.first().map(|s| (*s).clone()) else {
