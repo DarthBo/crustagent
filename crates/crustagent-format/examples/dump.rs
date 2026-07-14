@@ -73,12 +73,7 @@ fn main() {
     println!("            {sound_frames} frames reference a sound");
     for i in 0..chr.sound_count() {
         if let Some(wav) = chr.sound(i) {
-            // RIFF: "fmt " chunk at offset 12; wFormatTag is 2 bytes at offset 20.
-            let tag = if wav.len() >= 22 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" {
-                u16::from_le_bytes([wav[20], wav[21]])
-            } else {
-                0xFFFF
-            };
+            let tag = wav_format_tag(wav).unwrap_or(0xFFFF);
             let name = match tag {
                 1 => "PCM",
                 2 => "MS-ADPCM",
@@ -86,10 +81,21 @@ fn main() {
                 7 => "mu-law",
                 17 => "IMA-ADPCM",
                 49 => "GSM 6.10",
-                0xFFFF => "not-RIFF",
+                0xFFFF => "no fmt chunk",
                 _ => "other",
             };
-            println!("  sound {i:2}: {:6} bytes  fmt=0x{tag:04X} ({name})", wav.len());
+            // Animations whose frames reference this sound.
+            let users: Vec<&str> = chr
+                .animations
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.frames.iter().any(|f| f.sound_ndx == i as i16))
+                .map(|(idx, _)| chr.gesture_names[idx].as_str())
+                .collect();
+            println!(
+                "  sound {i:2}: {:6} bytes  fmt=0x{tag:04X} ({name})  used by: {users:?}",
+                wav.len()
+            );
         }
     }
 
@@ -103,4 +109,21 @@ fn main() {
         }
     }
     println!("Decoded   : {ok} images ok, {failed} failed");
+}
+
+/// Read a WAV's `wFormatTag` by walking RIFF chunks (fmt isn't always at offset 12).
+fn wav_format_tag(b: &[u8]) -> Option<u16> {
+    if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut pos = 12;
+    while pos + 8 <= b.len() {
+        let id = &b[pos..pos + 4];
+        let size = u32::from_le_bytes([b[pos + 4], b[pos + 5], b[pos + 6], b[pos + 7]]) as usize;
+        if id == b"fmt " && pos + 10 <= b.len() {
+            return Some(u16::from_le_bytes([b[pos + 8], b[pos + 9]]));
+        }
+        pos += 8 + size + (size & 1);
+    }
+    None
 }
