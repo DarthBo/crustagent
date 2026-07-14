@@ -30,10 +30,10 @@
 use std::collections::VecDeque;
 
 use crustagent_core::{
-    sequence_animation, wrap_words, BalloonLayout, Character, Direction, IdleDirector, MoveTo,
-    SplitMix64,
+    sequence_animation, sequence_exit, wrap_words, BalloonLayout, Character, Direction,
+    IdleDirector, MoveTo, SplitMix64,
 };
-use crustagent_format::{AcsFile, MouthOverlay, Rgba};
+use crustagent_format::{AcsFile, MouthOverlay, ReturnKind, Rgba};
 
 pub use crustagent_format::{self as format, AcsFile as CharacterFile};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent};
@@ -165,6 +165,11 @@ impl Agent {
         (self.file.header.image_size.0 as u32, self.file.header.image_size.1 as u32)
     }
 
+    /// Whether the character is currently auto-idling (queue empty, nothing playing).
+    pub fn is_idle(&self) -> bool {
+        matches!(self.activity, Activity::Idle)
+    }
+
     /// Whether the character is currently shown.
     pub fn is_visible(&self) -> bool {
         self.visible
@@ -285,8 +290,8 @@ impl Agent {
                 self.start_state("HIDING", false, Activity::Hiding);
             }
             Request::Play(name) => {
-                let indices = self.gesture_indices(&name);
-                self.build_track(&indices, false);
+                let frames = self.build_gesture_frames(&name);
+                self.install_track(frames, false);
                 self.activity = Activity::Gesture;
             }
             Request::GestureAt { x, y } => {
@@ -355,14 +360,6 @@ impl Agent {
             .position(|n| n.eq_ignore_ascii_case(name))
     }
 
-    fn gesture_indices(&self, name: &str) -> Vec<usize> {
-        let ch = Character::new(&self.file);
-        ch.full_gesture(name)
-            .iter()
-            .filter_map(|a| self.anim_index(&a.name))
-            .collect()
-    }
-
     fn direction_to(&self, x: i32, y: i32) -> Direction {
         let (w, h) = self.size();
         let cx = self.position.0 + w as i32 / 2;
@@ -373,19 +370,67 @@ impl Agent {
     fn build_track(&mut self, indices: &[usize], loops: bool) {
         let mut track = Vec::new();
         for &idx in indices {
-            if let Some(anim) = self.file.animations.get(idx) {
-                let seq = sequence_animation(anim, &mut self.rng);
-                for e in &seq.frames {
-                    track.push(TrackFrame {
-                        anim: idx,
-                        frame: e.frame,
-                        dur_ms: (e.duration_cs as u32 * 10).max(1),
-                    });
+            self.append_forward(&mut track, idx);
+        }
+        self.install_track(track, loops);
+    }
+
+    /// Append an animation's forward (RNG) walk to `track`.
+    fn append_forward(&mut self, track: &mut Vec<TrackFrame>, idx: usize) {
+        if let Some(anim) = self.file.animations.get(idx) {
+            let seq = sequence_animation(anim, &mut self.rng);
+            for e in &seq.frames {
+                track.push(TrackFrame {
+                    anim: idx,
+                    frame: e.frame,
+                    dur_ms: (e.duration_cs as u32 * 10).max(1),
+                });
+            }
+        }
+    }
+
+    /// Build the full track for a `Play`d gesture: each part's forward walk, plus — for a
+    /// part whose return is `ExitBranching` (returnType 1, e.g. Merlin's `Pleased`) — its
+    /// *exit* walk, so the character reverses out of the pose back to rest instead of
+    /// freezing mid-gesture and snapping to idle.
+    fn build_gesture_frames(&mut self, name: &str) -> Vec<TrackFrame> {
+        let indices: Vec<usize> = {
+            let ch = Character::new(&self.file);
+            ch.full_gesture(name)
+                .iter()
+                .filter_map(|a| self.anim_index(&a.name))
+                .collect()
+        };
+        let mut track = Vec::new();
+        for idx in indices {
+            let before = track.len();
+            self.append_forward(&mut track, idx);
+
+            let anim = &self.file.animations[idx];
+            if anim.return_kind == ReturnKind::ExitBranching {
+                // Continue the exit branch from where the forward walk ended.
+                if let Some(last) = track.get(before..).and_then(|s| s.last()) {
+                    let exit_from = anim.frames[last.frame].exit_frame;
+                    if exit_from >= 0 && (exit_from as usize) < anim.frames.len() {
+                        let ex = sequence_exit(anim, exit_from as usize);
+                        for e in &ex.frames {
+                            track.push(TrackFrame {
+                                anim: idx,
+                                frame: e.frame,
+                                dur_ms: (e.duration_cs as u32 * 10).max(1),
+                            });
+                        }
+                    }
                 }
             }
         }
+        track
+    }
+
+    fn install_track(&mut self, track: Vec<TrackFrame>, loops: bool) {
         if track.is_empty() {
             self.build_rest_track();
+            self.track_loops = loops;
             return;
         }
         self.track_total_ms = track.iter().map(|f| f.dur_ms).sum::<u32>().max(1);

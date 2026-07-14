@@ -56,4 +56,20 @@ fn main() {
             e.duration_cs as u32 * 10
         );
     }
+
+    println!("--- raw source frames ---");
+    for (i, f) in anim.frames.iter().enumerate() {
+        let branches: Vec<String> = f
+            .branching
+            .iter()
+            .map(|b| format!("{}@{}%", b.frame_ndx, b.probability))
+            .collect();
+        println!(
+            "  frame {:>3}  dur={:>4}cs  exit={:<4}  branch=[{}]",
+            i,
+            f.duration,
+            f.exit_frame,
+            branches.join(", ")
+        );
+    }
 }

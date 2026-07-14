@@ -80,3 +80,29 @@ fn gesture_and_stop() {
     run(&mut agent, 3000);
     assert!(agent.is_visible());
 }
+
+#[test]
+fn exit_branching_gesture_plays_its_return() {
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 3000);
+
+    // Merlin's "Pleased" is a returnType==1 (ExitBranching) gesture: forward it is the
+    // hands-together motion (~500ms), and the return is the exit walk back out. With the
+    // return played, the whole gesture runs noticeably longer than the forward half.
+    assert!(agent.file().animation("Pleased").is_some());
+    agent.play("Pleased");
+    agent.update(16); // start the gesture
+    assert!(!agent.is_idle());
+
+    let mut elapsed = 16u32;
+    while !agent.is_idle() && elapsed < 5000 {
+        agent.update(16);
+        elapsed += 16;
+    }
+    // Forward-only would end near ~500ms; with the exit return it runs ~900ms.
+    assert!(
+        elapsed > 700,
+        "Pleased ended after only {elapsed}ms — exit return not played"
+    );
+}
