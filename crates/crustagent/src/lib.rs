@@ -58,7 +58,11 @@ pub enum Request {
 /// What the balloon currently shows (already wrapped to the visible words).
 #[derive(Clone, Debug)]
 pub struct BalloonView {
+    /// Layout of the words revealed so far (what to draw now).
     pub layout: BalloonLayout,
+    /// Layout of the *entire* phrase — constant during a phrase, so a host can size a
+    /// balloon window once instead of resizing as words appear.
+    pub full: BalloonLayout,
     /// Total words in the phrase (for progress).
     pub total_words: usize,
     /// Words revealed so far.
@@ -459,8 +463,10 @@ impl Agent {
         let total = self.speak_words.len();
         let shown = self.speak_shown.clamp(1, total);
         let layout = wrap_words(&self.speak_words[..shown], self.per_line);
+        let full = wrap_words(&self.speak_words, self.per_line);
         Some(BalloonView {
             layout,
+            full,
             total_words: total,
             shown_words: shown,
         })

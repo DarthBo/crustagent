@@ -1,15 +1,16 @@
 //! A windowed viewer that plays a Microsoft Agent character, driven by the `crustagent`
 //! embedding API.
 //!
-//! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--float] [--dry-run]`
+//! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--float] [--say]`
 //!
-//! The character idles by default; a balloon appears when it speaks. Interaction:
-//! - **left-drag** moves it (system window drag),
-//! - **right-click** opens a small command menu; **left-click** an item to run it,
-//! - **Esc/Q** quits.
+//! Two windows, MS-Agent-style: a tight, non-resizable **character** window, and a
+//! separate **balloon** window that appears above (or below, near the screen top) the
+//! character while it speaks. The character idles by default.
 //!
-//! `--float` renders through the `wgpu` backend (transparent, borderless, always-on-top);
-//! otherwise a `softbuffer` window draws on a transparency checkerboard.
+//! Interaction: **left-drag** moves the character, **right-click** opens a command menu
+//! (left-click an item to run it), **Esc/Q** quits. `--float` renders both windows
+//! transparent/borderless/always-on-top (via `wgpu`); otherwise `softbuffer` windows on a
+//! checkerboard. `--say` uses a real audio TTS backend (macOS).
 
 mod paint;
 mod png;
@@ -22,15 +23,15 @@ use crustagent::{Agent, Request};
 use present::{Presenter, SoftPresenter, WgpuPresenter};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
 const SCALE: i32 = 3;
-const STRIP: i32 = 72; // modest area reserved above the character for the balloon
 const MENU_SCALE: i32 = 2;
+const GAP: i32 = 4; // px between balloon and character
 
 #[derive(Clone)]
 struct Menu {
@@ -80,121 +81,187 @@ fn build_menu(agent: &Agent, x: i32, y: i32) -> Menu {
     Menu { x, y, items }
 }
 
+fn make_window(el: &ActiveEventLoop, w: u32, h: u32, float: bool, title: &str) -> Arc<Window> {
+    let mut attrs = Window::default_attributes()
+        .with_title(title)
+        .with_resizable(false)
+        .with_inner_size(PhysicalSize::new(w, h));
+    if float {
+        attrs = attrs
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+    }
+    Arc::new(el.create_window(attrs).expect("create window"))
+}
+
+fn make_presenter(float: bool, window: Arc<Window>) -> Box<dyn Presenter> {
+    if float {
+        Box::new(WgpuPresenter::new(window))
+    } else {
+        Box::new(SoftPresenter::new(window))
+    }
+}
+
+fn fill_bg(buf: &mut [u8], w: u32, h: u32, float: bool) {
+    for y in 0..h {
+        for x in 0..w {
+            let o = ((y * w + x) * 4) as usize;
+            let (r, g, b, a) = if float {
+                (0, 0, 0, 0)
+            } else if ((x / 16) + (y / 16)).is_multiple_of(2) {
+                (0xC8, 0xC8, 0xC8, 0xFF)
+            } else {
+                (0x90, 0x90, 0x90, 0xFF)
+            };
+            buf[o] = r;
+            buf[o + 1] = g;
+            buf[o + 2] = b;
+            buf[o + 3] = a;
+        }
+    }
+}
+
 struct App {
     agent: Agent,
     float: bool,
-    scratch: Vec<u8>,
+
+    char_window: Option<Arc<Window>>,
+    char_presenter: Option<Box<dyn Presenter>>,
+    char_scratch: Vec<u8>,
+
+    balloon_window: Option<Arc<Window>>,
+    balloon_presenter: Option<Box<dyn Presenter>>,
+    balloon_scratch: Vec<u8>,
+    balloon_dim: (u32, u32),
+    balloon_below: bool,
+
     cursor: (i32, i32),
     menu: Option<Menu>,
     last: Instant,
-    window: Option<Arc<Window>>,
-    presenter: Option<Box<dyn Presenter>>,
 }
 
 impl App {
-    fn compose(&mut self, win_w: u32, win_h: u32) {
-        // Gather owned data first (no borrow held while writing scratch).
+    /// Create the balloon window on first use, then keep it (shown/hidden per phrase).
+    fn ensure_balloon_window(&mut self, el: &ActiveEventLoop, w: u32, h: u32) {
+        if self.balloon_window.is_none() {
+            let win = make_window(el, w, h, self.float, "crustagent balloon");
+            win.set_visible(false);
+            self.balloon_presenter = Some(make_presenter(self.float, win.clone()));
+            self.balloon_window = Some(win);
+            self.balloon_dim = (w, h);
+        } else if self.balloon_dim != (w, h) {
+            if let Some(win) = &self.balloon_window {
+                let _ = win.request_inner_size(PhysicalSize::new(w, h));
+            }
+            self.balloon_dim = (w, h);
+        }
+    }
+
+    /// Position the balloon window above the character (or below, near the screen top).
+    fn reposition_balloon(&mut self) {
+        let (Some(cw), Some(bw)) = (&self.char_window, &self.balloon_window) else {
+            return;
+        };
+        let Ok(cpos) = cw.outer_position() else {
+            return;
+        };
+        let csize = cw.outer_size();
+        let (bwidth, bheight) = self.balloon_dim;
+        let bx = cpos.x + (csize.width as i32 - bwidth as i32) / 2;
+        let mut by = cpos.y - bheight as i32 - GAP;
+        self.balloon_below = by < 0;
+        if self.balloon_below {
+            by = cpos.y + csize.height as i32 + GAP;
+        }
+        bw.set_outer_position(PhysicalPosition::new(bx, by));
+    }
+
+    fn compose_char(&mut self, w: u32, h: u32) {
         let img = self.agent.composite_current();
-        let balloon = self.agent.balloon();
         let menu = self.menu.clone();
         let float = self.float;
+        self.char_scratch.resize((w * h * 4) as usize, 0);
+        fill_bg(&mut self.char_scratch, w, h, float);
 
-        let w = win_w as i32;
-        self.scratch.resize((win_w * win_h * 4) as usize, 0);
-        let buf = &mut self.scratch;
-
-        // background
-        for y in 0..win_h {
-            for x in 0..win_w {
-                let o = ((y * win_w + x) * 4) as usize;
-                let (r, g, b, a) = if float {
-                    (0, 0, 0, 0)
-                } else if ((x / 16) + (y / 16)).is_multiple_of(2) {
-                    (0xC8, 0xC8, 0xC8, 0xFF)
-                } else {
-                    (0x90, 0x90, 0x90, 0xFF)
-                };
-                buf[o] = r;
-                buf[o + 1] = g;
-                buf[o + 2] = b;
-                buf[o + 3] = a;
-            }
-        }
-
-        let mut canvas = paint::Canvas::new(buf, win_w, win_h);
-
-        // character (centered horizontally, below the balloon strip)
+        let mut canvas = paint::Canvas::new(&mut self.char_scratch, w, h);
         if let Some(img) = &img {
             let cw = img.width as i32;
-            let ox = (w - cw * SCALE) / 2;
-            canvas.blit_scaled(&img.pixels, cw, img.height as i32, ox, STRIP, SCALE);
+            let ch = img.height as i32;
+            let ox = (w as i32 - cw * SCALE) / 2;
+            let oy = (h as i32 - ch * SCALE) / 2;
+            canvas.blit_scaled(&img.pixels, cw, ch, ox, oy, SCALE);
         }
-        // balloon: sits above the character, tail pointing down at its head
-        if let Some(b) = &balloon {
-            canvas.balloon(&b.layout.lines, w / 2, STRIP, false);
-        }
-        // menu
         if let Some(m) = &menu {
             canvas.menu(m.x, m.y, m.width(), Menu::row_h(), &m.items);
+        }
+    }
+
+    fn compose_balloon(&mut self, w: u32, h: u32) {
+        let balloon = self.agent.balloon();
+        let float = self.float;
+        let below = self.balloon_below;
+        self.balloon_scratch.resize((w * h * 4) as usize, 0);
+        fill_bg(&mut self.balloon_scratch, w, h, float);
+
+        if let Some(bv) = &balloon {
+            let mut canvas = paint::Canvas::new(&mut self.balloon_scratch, w, h);
+            // Tail tip at the window edge nearest the character.
+            let (tip_x, tip_y) = if below {
+                (w as i32 / 2, 0)
+            } else {
+                (w as i32 / 2, h as i32 - 1)
+            };
+            canvas.balloon(&bv.layout.lines, tip_x, tip_y, below);
         }
     }
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.char_window.is_some() {
             return;
         }
         let (cw, ch) = self.agent.size();
-        let win_w = (cw as i32 * SCALE).max(320);
-        // Character sits at the bottom; a modest strip on top holds the balloon.
-        let win_h = ch as i32 * SCALE + STRIP;
         let name = self
             .agent
             .file()
             .default_name()
             .map(|n| n.name.clone())
             .unwrap_or_default();
-        // Size in *physical* pixels: we composite in physical pixels (the surface's real
-        // size), so a logical size would double the window on HiDPI and leave dead space.
-        let mut attrs = Window::default_attributes()
-            .with_title(format!("crustagent — {name}"))
-            .with_inner_size(PhysicalSize::new(win_w as u32, win_h as u32));
-        if self.float {
-            attrs = attrs
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_window_level(WindowLevel::AlwaysOnTop);
-        }
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let presenter: Box<dyn Presenter> = if self.float {
-            Box::new(WgpuPresenter::new(window.clone()))
-        } else {
-            Box::new(SoftPresenter::new(window.clone()))
-        };
-        window.request_redraw();
-        self.window = Some(window);
-        self.presenter = Some(presenter);
+        let win = make_window(
+            el,
+            cw * SCALE as u32,
+            ch * SCALE as u32,
+            self.float,
+            &format!("crustagent — {name}"),
+        );
+        win.request_redraw();
+        self.char_presenter = Some(make_presenter(self.float, win.clone()));
+        self.char_window = Some(win);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let is_char = self.char_window.as_ref().is_some_and(|w| w.id() == id);
+        let is_balloon = self.balloon_window.as_ref().is_some_and(|w| w.id() == id);
+
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => el.exit(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     if let PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) = event.physical_key {
-                        event_loop.exit();
+                        el.exit();
                     }
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } if is_char => {
                 self.cursor = (position.x as i32, position.y as i32);
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button,
                 ..
-            } => match button {
+            } if is_char => match button {
                 MouseButton::Right => {
                     self.menu = Some(build_menu(&self.agent, self.cursor.0, self.cursor.1));
                 }
@@ -203,39 +270,59 @@ impl ApplicationHandler for App {
                         if let Some(i) = menu.hit(self.cursor.0, self.cursor.1) {
                             self.agent.request(menu.items[i].1.clone());
                         }
-                    } else if let Some(window) = &self.window {
+                    } else if let Some(window) = &self.char_window {
                         let _ = window.drag_window();
                     }
                 }
                 _ => {}
             },
-            WindowEvent::RedrawRequested => {
-                let Some(window) = self.window.clone() else {
-                    return;
-                };
-                let size = window.inner_size();
-                if size.width == 0 || size.height == 0 {
-                    return;
+            WindowEvent::RedrawRequested if is_char => {
+                if let Some(window) = self.char_window.clone() {
+                    let s = window.inner_size();
+                    if s.width > 0 && s.height > 0 {
+                        self.compose_char(s.width, s.height);
+                        if let Some(p) = self.char_presenter.as_mut() {
+                            p.present(&self.char_scratch, s.width, s.height);
+                        }
+                    }
                 }
-                self.compose(size.width, size.height);
-                if let Some(p) = self.presenter.as_mut() {
-                    p.present(&self.scratch, size.width, size.height);
+            }
+            WindowEvent::RedrawRequested if is_balloon => {
+                if let Some(window) = self.balloon_window.clone() {
+                    let s = window.inner_size();
+                    if s.width > 0 && s.height > 0 {
+                        self.compose_balloon(s.width, s.height);
+                        if let Some(p) = self.balloon_presenter.as_mut() {
+                            p.present(&self.balloon_scratch, s.width, s.height);
+                        }
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_millis() as u32;
         self.last = now;
         self.agent.update(dt);
 
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            now + Duration::from_millis(16),
-        ));
-        if let Some(window) = &self.window {
+        // Balloon window: size once per phrase, keep it, show/hide as speech starts/stops.
+        if let Some(bv) = self.agent.balloon() {
+            let (bw, bh) = paint::balloon_size(bv.full.cols, bv.full.rows);
+            self.ensure_balloon_window(el, bw, bh);
+            self.reposition_balloon();
+            if let Some(win) = &self.balloon_window {
+                win.set_visible(true);
+                win.request_redraw();
+            }
+        } else if let Some(win) = &self.balloon_window {
+            win.set_visible(false);
+        }
+
+        el.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(16)));
+        if let Some(window) = &self.char_window {
             window.request_redraw();
         }
     }
@@ -246,11 +333,10 @@ fn main() {
     let float = args.iter().any(|a| a == "--float");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
-    // Debug: render a sample balloon to a PNG and exit (for headless visual checks).
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
         let (w, h) = (420u32, 120u32);
-        let mut buf = vec![0x50u8; (w * h * 4) as usize]; // opaque dark-gray bg
+        let mut buf = vec![0x50u8; (w * h * 4) as usize];
         for px in buf.chunks_exact_mut(4) {
             px[3] = 0xFF;
         }
@@ -262,9 +348,8 @@ fn main() {
     }
 
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-
     let Some(path) = positional.first().map(|s| (*s).clone()) else {
-        eprintln!("usage: crustagent-render <file.acs> [Animation] [--float] [--dry-run]");
+        eprintln!("usage: crustagent-render <file.acs> [Animation] [--float] [--say]");
         std::process::exit(2);
     };
     let mut agent = Agent::load(&path).unwrap_or_else(|e| {
@@ -272,7 +357,6 @@ fn main() {
         std::process::exit(1);
     });
 
-    // --say: use a real audio TTS backend (macOS `say`) so speech is audible.
     if args.iter().any(|a| a == "--say") {
         agent.set_tts(crustagent::default_engine());
     }
@@ -294,7 +378,6 @@ fn main() {
     println!("(pass --say for audible speech)");
 
     if dry_run {
-        // Exercise a scripted session headlessly.
         agent.speak("Hello from crustagent!");
         agent.play("Greet");
         for _ in 0..200 {
@@ -307,12 +390,17 @@ fn main() {
     let mut app = App {
         agent,
         float,
-        scratch: Vec::new(),
+        char_window: None,
+        char_presenter: None,
+        char_scratch: Vec::new(),
+        balloon_window: None,
+        balloon_presenter: None,
+        balloon_scratch: Vec::new(),
+        balloon_dim: (0, 0),
+        balloon_below: false,
         cursor: (0, 0),
         menu: None,
         last: Instant::now(),
-        window: None,
-        presenter: None,
     };
 
     let event_loop = EventLoop::new().expect("event loop");

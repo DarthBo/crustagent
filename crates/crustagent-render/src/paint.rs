@@ -6,6 +6,16 @@ use font8x8::legacy::BASIC_LEGACY;
 
 const BSCALE: i32 = 2;
 const MENU_SCALE: i32 = 2;
+const PAD: i32 = 6;
+const TAIL_LEN: i32 = 9;
+
+/// The window size (physical px) needed to hold a balloon with `cols`×`rows` characters,
+/// including padding and the tail.
+pub fn balloon_size(cols: usize, rows: usize) -> (u32, u32) {
+    let bw = cols as i32 * 8 * BSCALE + PAD * 2 + 2;
+    let bh = rows as i32 * 8 * BSCALE + PAD * 2 + TAIL_LEN + 2;
+    (bw.max(16) as u32, bh.max(16) as u32)
+}
 
 /// A borrowed RGBA8 drawing target.
 pub struct Canvas<'a> {
@@ -105,11 +115,11 @@ impl<'a> Canvas<'a> {
         if rows == 0 {
             return;
         }
-        let pad = 6;
+        let pad = PAD;
         let bw = cols * 8 * BSCALE + pad * 2;
         let bh = rows * 8 * BSCALE + pad * 2;
         let tail_half = 6;
-        let tail_len = 9;
+        let tail_len = TAIL_LEN;
 
         // Body position: centered on the tip, clamped to stay on the window.
         let bx = (tip_x - bw / 2).clamp(2, (self.w - bw - 2).max(2));

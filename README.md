@@ -28,8 +28,12 @@ crates/
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
   crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SayTts
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
-  crustagent-render/   # windowed/floating viewer (winit + softbuffer/wgpu) driving an Agent
+  crustagent-render/   # viewer: tight character window + separate balloon window
 ```
+
+The viewer uses two windows, MS-Agent-style: a **tight, non-resizable character window**
+and a **separate balloon window** that appears above the character (or below, near the
+screen top) while it speaks. `--float` makes both transparent/borderless/always-on-top.
 
 ### Embed it
 
