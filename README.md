@@ -26,6 +26,7 @@ crates/
   crustagent/          # embedding API: Agent + serial action queue (start here to embed)
   crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACF header)
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
+  crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SayTts
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
   crustagent-render/   # windowed/floating viewer (winit + softbuffer/wgpu) driving an Agent
 ```
@@ -50,8 +51,14 @@ The `Agent` runs a serial action queue (`show`/`hide`/`play`/`speak`/`move_to`/
 `gesture_at`/`wait`), auto-idles when the queue drains, and hands back a composited RGBA
 frame + balloon + position each tick — windowing- and audio-agnostic.
 
-Planned: TTS/audio (real lip-sync), `.aca` bodies for ACF + the ACS 1.5 (OLE2) format,
-and a host-defined command API for the pop-up menu.
+Speech goes through a pluggable `TtsEngine` (`crustagent-tts`): the default `TimedTts` is
+silent and paces the balloon/mouth on a timer, while `SayTts` (macOS) plays real audio via
+`say`. Engines emit a `VoiceEvent` stream (word boundaries → balloon reveal, visemes →
+mouth) that the `Agent` consumes each tick.
+
+Planned: word/viseme-accurate TTS backends (SAPI/WinRT, speech-dispatcher, a portable
+engine) for true lip-sync, `.aca` bodies for ACF + the ACS 1.5 (OLE2) format, and a
+host-defined command API for the pop-up menu.
 
 ## `crustagent-format` — status
 
@@ -97,6 +104,7 @@ cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs Ge
 # See it on screen:
 cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles on a checkerboard
 cargo run -p crustagent-render -- assets/agents/Merlin.acs --float          # floating desktop buddy (wgpu)
+cargo run -p crustagent-render -- assets/agents/Merlin.acs --float --say    # ...and audible (macOS `say`)
 cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention     # loop a specific gesture
 ```
 

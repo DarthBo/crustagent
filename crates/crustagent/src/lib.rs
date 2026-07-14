@@ -36,9 +36,7 @@ use crustagent_core::{
 use crustagent_format::{AcsFile, MouthOverlay, Rgba};
 
 pub use crustagent_format::{self as format, AcsFile as CharacterFile};
-
-/// Milliseconds each word is shown before the next, when pacing a balloon without TTS.
-const PACE_MS: u32 = 300;
+pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent};
 
 /// A high-level request enqueued on the [`Agent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,8 +103,10 @@ pub struct Agent {
 
     // move / speak state
     movement: MoveTo,
+    tts: Box<dyn TtsEngine>,
     speak_words: Vec<String>,
-    speak_total_ms: u32,
+    speak_shown: usize,
+    speak_mouth: Option<MouthOverlay>,
 }
 
 impl Agent {
@@ -138,9 +138,17 @@ impl Agent {
             track_loops: false,
             track_elapsed_ms: 0,
             movement: MoveTo::new((0, 0), (0, 0), 0),
+            tts: Box::new(TimedTts::new()),
             speak_words: Vec::new(),
-            speak_total_ms: 0,
+            speak_shown: 0,
+            speak_mouth: None,
         }
+    }
+
+    /// Swap the text-to-speech engine (default is the silent [`TimedTts`]). Use
+    /// [`default_engine`] for real audio where a backend exists.
+    pub fn set_tts(&mut self, engine: Box<dyn TtsEngine>) {
+        self.tts = engine;
     }
 
     /// The parsed character file.
@@ -221,7 +229,15 @@ impl Agent {
                 }
             }
             Activity::Speak => {
-                if self.track_elapsed_ms >= self.speak_total_ms {
+                for event in self.tts.poll(dt_ms) {
+                    match event {
+                        VoiceEvent::WordStarted(i) => self.speak_shown = i + 1,
+                        VoiceEvent::Mouth(m) => self.speak_mouth = Some(m),
+                        _ => {}
+                    }
+                }
+                if !self.tts.is_speaking() {
+                    self.speak_mouth = None;
                     self.next();
                 }
             }
@@ -280,8 +296,11 @@ impl Agent {
             }
             Request::Speak(text) => {
                 let parsed = crustagent_core::parse_speech(&text);
+                let spoken = parsed.spoken_text();
                 self.speak_words = parsed.display_words;
-                self.speak_total_ms = (self.speak_words.len() as u32).max(1) * PACE_MS;
+                self.speak_shown = 0;
+                self.speak_mouth = None;
+                self.tts.speak(&spoken, self.speak_words.len());
                 self.start_state("SPEAKING", true, Activity::Speak);
             }
             Request::Wait(ms) => {
@@ -411,15 +430,11 @@ impl Agent {
         self.track.last()
     }
 
-    /// A fake talking mouth overlay while speaking (no TTS visemes yet): alternate an
-    /// open/closed mouth so the character looks like it's talking.
+    /// The mouth overlay to composite now — driven by the TTS engine's viseme/mouth
+    /// events while speaking (see [`TtsEngine`]).
     fn current_mouth(&self) -> Option<MouthOverlay> {
-        if self.activity == Activity::Speak && self.track_elapsed_ms < self.speak_total_ms {
-            if (self.track_elapsed_ms / 150).is_multiple_of(2) {
-                Some(MouthOverlay::Wide2)
-            } else {
-                Some(MouthOverlay::Closed)
-            }
+        if self.activity == Activity::Speak {
+            self.speak_mouth
         } else {
             None
         }
@@ -442,7 +457,7 @@ impl Agent {
             return None;
         }
         let total = self.speak_words.len();
-        let shown = ((self.track_elapsed_ms / PACE_MS) as usize + 1).min(total);
+        let shown = self.speak_shown.clamp(1, total);
         let layout = wrap_words(&self.speak_words[..shown], self.per_line);
         Some(BalloonView {
             layout,

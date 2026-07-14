@@ -11,3 +11,4 @@ workspace = true
 [dependencies]
 crustagent-format = { path = "../crustagent-format" }
 crustagent-core = { path = "../crustagent-core" }
+crustagent-tts = { path = "../crustagent-tts" }

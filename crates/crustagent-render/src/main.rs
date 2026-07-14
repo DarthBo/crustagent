@@ -281,6 +281,11 @@ fn main() {
         std::process::exit(1);
     });
 
+    // --say: use a real audio TTS backend (macOS `say`) so speech is audible.
+    if args.iter().any(|a| a == "--say") {
+        agent.set_tts(crustagent::default_engine());
+    }
+
     agent.show();
     if let Some(name) = positional.get(1) {
         if agent.file().animation(name).is_none() {
@@ -295,6 +300,7 @@ fn main() {
 
     let name = agent.file().default_name().map(|n| n.name.clone()).unwrap_or_default();
     println!("{name}: right-click for a menu · left-drag to move · Esc/Q to quit");
+    println!("(pass --say for audible speech)");
 
     if dry_run {
         // Exercise a scripted session headlessly.

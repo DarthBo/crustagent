@@ -1,0 +1,12 @@
+[package]
+name = "crustagent-tts"
+description = "Pluggable text-to-speech abstraction for crustagent (voice events + backends)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crustagent-format = { path = "../crustagent-format" }
