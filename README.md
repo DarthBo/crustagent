@@ -54,6 +54,7 @@ Implemented:
 - **Character** — name/state → animation resolution (case-insensitive) over a parsed
   file, incl. the multi-part gesture convention (`full_gesture` chains a gesture's base +
   `…Continued` + `…Return` parts).
+- **IdleDirector** — escalating auto-idle animation selection (`IDLINGLEVEL1→2→3`).
 - **Speech-text parser** (`parse_speech`) — splits a `Speak` string into balloon display
   words and a neutral speech-directive stream (all 23 tags, `\Map` dual text, `\Mrk`
   bookmarks, `\\`/`\"` escaping).
@@ -72,15 +73,20 @@ cargo run -p crustagent-format --example render   -- assets/agents/Merlin.acs Gr
 cargo run -p crustagent-core   --example sequence -- assets/agents/Merlin.acs Greet     # print the timeline
 cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs GetAttention  # gesture -> GIF
 
-# See it on screen (opens a window, loops the gesture):
-cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention
-cargo run -p crustagent-render -- assets/agents/Merlin.acs Greet --float   # borderless always-on-top
+# See it on screen:
+cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles on a checkerboard
+cargo run -p crustagent-render -- assets/agents/Merlin.acs --float          # floating desktop buddy (wgpu)
+cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention     # loop a specific gesture
 ```
 
-The viewer draws the character on a transparency checkerboard by default. `--float`
-requests a borderless, always-on-top, transparent window (the "desktop buddy" look); it
-relies on the OS honoring per-pixel window alpha, which the current software backend does
-not guarantee on macOS — a GPU/compositor backend for a true desktop overlay is planned.
+With no animation named, the character **idles** — escalating `IDLINGLEVEL` animations,
+like the assistant standing around. Name one to loop that gesture instead. **Drag** the
+character with the left mouse button; **Esc/Q** quits.
+
+Two presentation backends: the default opaque window draws on a transparency checkerboard
+(`softbuffer`, works everywhere); `--float` is a borderless, always-on-top, **transparent**
+window rendered with `wgpu` (premultiplied-alpha surface) for the real floating
+desktop-buddy effect.
 
 ## Provenance & license
 

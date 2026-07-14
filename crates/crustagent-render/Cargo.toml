@@ -13,3 +13,5 @@ crustagent-format = { path = "../crustagent-format" }
 crustagent-core = { path = "../crustagent-core" }
 winit = "0.30"
 softbuffer = "0.4"
+wgpu = "22"
+pollster = "0.3"
