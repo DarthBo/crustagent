@@ -220,22 +220,20 @@ impl App {
         self.quitting = true;
         self.close_menu();
         self.agent.stop();
-        // Wave goodbye, then hide. If the farewell ends on an empty frame it *is* the exit,
-        // so hide instantly (no HIDING animation) — otherwise the character would vanish
-        // via Goodbye, then reappear for Hide and blink out again.
-        let farewell = ["Goodbye", "Wave"]
-            .into_iter()
-            .find(|f| self.agent.file().animation(f).is_some());
-        match farewell {
-            Some(f) if frame_empty(&self.agent, f, false) => {
-                self.agent.play(f);
+        // Characters like Clippit/Genius have a dedicated Goodbye animation that IS the
+        // exit (it ends on an empty frame). Play it, then hide instantly, otherwise the
+        // quick Hide pop would make them reappear and blink out again. Characters without
+        // a Goodbye (e.g. Merlin) use their native Hide animation as the exit — Wave is a
+        // mid-scene gesture, not the goodbye.
+        if self.agent.file().animation("Goodbye").is_some() {
+            self.agent.play("Goodbye");
+            if frame_empty(&self.agent, "Goodbye", false) {
                 self.agent.hide_fast();
-            }
-            Some(f) => {
-                self.agent.play(f);
+            } else {
                 self.agent.hide();
             }
-            None => self.agent.hide(),
+        } else {
+            self.agent.hide();
         }
         self.quit_deadline = Some(Instant::now() + Duration::from_secs(6));
     }
@@ -518,25 +516,22 @@ fn main() {
         }
         agent.show();
         agent.play((*name).clone());
-    } else {
-        // Open with the greeting. If the greeting appears from an empty frame it *is* the
-        // entrance, so show instantly (no SHOWING animation) — otherwise the character
-        // would flash in via Show, blink to empty, then reappear. If there's no greeting,
-        // fall back to the normal Show animation.
-        let greeting = ["Greeting", "Greet"]
-            .into_iter()
-            .find(|g| agent.file().animation(g).is_some());
-        match greeting {
-            Some(g) if frame_empty(&agent, g, true) => {
-                agent.show_fast();
-                agent.play(g);
-            }
-            Some(g) => {
-                agent.show();
-                agent.play(g);
-            }
-            None => agent.show(),
+    } else if agent.file().animation("Greeting").is_some() {
+        // Characters like Clippit/Genius have a dedicated Greeting animation that IS the
+        // entrance (it appears from an empty frame). Show instantly and let Greeting play,
+        // otherwise the quick Show pop would flash the character in before it reappears.
+        // (A Greeting that starts from rest instead just plays after a normal Show.)
+        if frame_empty(&agent, "Greeting", true) {
+            agent.show_fast();
+        } else {
+            agent.show();
         }
+        agent.play("Greeting");
+    } else {
+        // No dedicated greeting (e.g. Merlin): the native Show animation *is* the entrance
+        // (the magician's puff-of-smoke appear). Greet/Wave are mid-scene gestures, not
+        // the entrance, so we don't play them here.
+        agent.show();
     }
 
     let name = agent.file().default_name().map(|n| n.name.clone()).unwrap_or_default();
