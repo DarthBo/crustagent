@@ -100,13 +100,24 @@ impl<'a> Cursor<'a> {
         Ok(Guid(bytes))
     }
 
-    /// Read a `COLORREF`/`RGBQUAD`: 4 bytes stored B, G, R, pad.
+    /// Read an `RGBQUAD` (DIB palette entry): 4 bytes stored B, G, R, pad.
     pub fn color(&mut self) -> Result<Color> {
         let b = self.take(4, "color")?;
         Ok(Color {
             b: b[0],
             g: b[1],
             r: b[2],
+        })
+    }
+
+    /// Read a Windows `COLORREF` (`0x00BBGGRR`): 4 bytes stored R, G, B, pad. Used for the
+    /// balloon's fore/back/border colors (unlike the DIB palette, which is `RGBQUAD`).
+    pub fn colorref(&mut self) -> Result<Color> {
+        let b = self.take(4, "colorref")?;
+        Ok(Color {
+            r: b[0],
+            g: b[1],
+            b: b[2],
         })
     }
 

@@ -47,9 +47,10 @@ pub fn tts(c: &mut Cursor, nt: bool) -> Result<Tts> {
 pub fn balloon(c: &mut Cursor, nt: bool) -> Result<Balloon> {
     let lines = c.u8()?;
     let per_line = c.u8()?;
-    let fg_color = c.color()?;
-    let bg_color = c.color()?;
-    let border_color = c.color()?;
+    // These are Windows COLORREFs (R,G,B), not RGBQUADs like the DIB palette.
+    let fg_color = c.colorref()?;
+    let bg_color = c.colorref()?;
+    let border_color = c.colorref()?;
     let font_name = c.string(nt)?;
     let font_height = c.i32()?;
     let weight = c.u16()?;
