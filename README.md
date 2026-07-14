@@ -121,7 +121,7 @@ cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs Ge
 
 # See it on your desktop (transparent, always-on-top):
 cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles
-cargo run -p crustagent-render -- assets/agents/Merlin.acs --say            # ...and audible (macOS `say`)
+cargo run -p crustagent-render -- assets/agents/Merlin.acs --tts            # ...and audible (cross-platform TTS)
 cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention     # loop a specific gesture
 ```
 

@@ -1,7 +1,7 @@
 //! A viewer that plays a Microsoft Agent character on the desktop, driven by the
 //! `crustagent` embedding API.
 //!
-//! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--say]`
+//! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--tts]`
 //!
 //! Two borderless, transparent, always-on-top windows (via `wgpu`), MS-Agent-style: a
 //! tight, non-resizable **character** window, and a separate **balloon** window that
@@ -9,8 +9,8 @@
 //! character idles by default.
 //!
 //! Interaction: **left-drag** moves the character, **right-click** opens a command menu
-//! (left-click an item to run it), **Esc/Q** quits. `--say` uses a real audio TTS backend
-//! (macOS).
+//! (left-click an item to run it), **Esc/Q** quits. `--tts` enables real audio speech via
+//! the cross-platform system TTS backend.
 
 mod paint;
 mod png;
@@ -74,6 +74,32 @@ fn frame_empty(agent: &Agent, name: &str, first: bool) -> bool {
         || matches!(file.composite_frame(frame, None), Ok(img) if img.is_fully_transparent())
 }
 
+/// Load a real balloon font, matching the character's requested family/size/weight where
+/// possible (falling back to a system sans). `None` if the system has no usable fonts, in
+/// which case the balloon degrades to the 8x8 bitmap font.
+fn load_balloon_font(agent: &Agent) -> Option<paint::Font> {
+    let (family, px, bold, italic) = match agent.file().balloon.as_ref() {
+        Some(b) => (
+            b.font_name.clone(),
+            font_px(b.font_height),
+            b.bold,
+            b.italic,
+        ),
+        None => (String::new(), 18.0, false, false),
+    };
+    paint::Font::system(&family, px, bold, italic)
+}
+
+/// Turn a LOGFONT `lfHeight` (device units, often negative) into a readable pixel size.
+fn font_px(lf_height: i32) -> f32 {
+    let p = lf_height.unsigned_abs() as f32;
+    if p < 1.0 {
+        18.0
+    } else {
+        p.clamp(15.0, 40.0)
+    }
+}
+
 /// Build the balloon paint colors from the character's own balloon style, falling back to
 /// readable defaults if the file's colors are degenerate (e.g. text == background).
 fn balloon_paint(agent: &Agent, kind: BalloonKind) -> paint::BalloonPaint {
@@ -127,6 +153,9 @@ struct App {
 
     cursor: (i32, i32),
     last: Instant,
+
+    // real balloon font (system TrueType), chosen from the character's balloon config
+    font: Option<paint::Font>,
 
     // graceful shutdown: play Goodbye + Hide before exiting
     quitting: bool,
@@ -289,14 +318,9 @@ impl App {
 
         if let Some(bv) = &balloon {
             let mut canvas = paint::Canvas::new(&mut self.balloon_scratch, w, h);
-            // Tail tip at the window edge nearest the character.
-            let (tip_x, tip_y) = if below {
-                (w as i32 / 2, 0)
-            } else {
-                (w as i32 / 2, h as i32 - 1)
-            };
             let style = balloon_paint(&self.agent, bv.kind);
-            canvas.balloon(&bv.layout.lines, tip_x, tip_y, below, &style);
+            // The tail is centered on the window, which is sized to fit the balloon.
+            canvas.balloon(&bv.layout.lines, below, &style, self.font.as_ref());
         }
     }
 }
@@ -476,7 +500,8 @@ impl ApplicationHandler for App {
 
         // Balloon window: size once per phrase, keep it, show/hide as speech starts/stops.
         if let Some(bv) = self.agent.balloon() {
-            let (bw, bh) = paint::balloon_size(bv.full.cols, bv.full.rows);
+            let (bw, bh) =
+                paint::balloon_size(self.font.as_ref(), &bv.full.lines, bv.full.cols, bv.full.rows);
             self.ensure_balloon_window(el, bw, bh);
             self.reposition_balloon();
             if let Some(win) = &self.balloon_window {
@@ -500,22 +525,23 @@ fn main() {
 
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
-        let (w, h) = (460u32, 130u32);
-        let mut buf = vec![0x50u8; (w * h * 4) as usize];
-        for px in buf.chunks_exact_mut(4) {
-            px[3] = 0xFF;
-        }
+        let font = paint::Font::system("", 20.0, false, false);
         let style = |think| paint::BalloonPaint {
             bg: [0xFF, 0xFF, 0xE1],
             border: [0x40, 0x40, 0x40],
             text: [0x10, 0x10, 0x10],
             think,
         };
+        let lines = vec!["Real TrueType balloon text!".to_string()];
+        let (w, h) = paint::balloon_size(font.as_ref(), &lines, lines[0].len(), 1);
+        let mut buf = vec![0x50u8; (w * h * 4) as usize];
+        for px in buf.chunks_exact_mut(4) {
+            px[3] = 0xFF;
+        }
         let mut canvas = paint::Canvas::new(&mut buf, w, h);
-        canvas.balloon(&["Speech balloon".to_string()], 110, 118, false, &style(false));
-        canvas.balloon(&["Thought balloon".to_string()], 350, 118, false, &style(true));
+        canvas.balloon(&lines, false, &style(false), font.as_ref());
         std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
-        println!("wrote {out}");
+        println!("wrote {out} ({w}x{h}, font: {})", if font.is_some() { "system" } else { "8x8 fallback" });
         return;
     }
 
@@ -536,7 +562,7 @@ fn main() {
 
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let Some(path) = positional.first().map(|s| (*s).clone()) else {
-        eprintln!("usage: crustagent-render <file.acs> [Animation] [--say]");
+        eprintln!("usage: crustagent-render <file.acs> [Animation] [--tts]");
         std::process::exit(2);
     };
     let mut agent = Agent::load(&path).unwrap_or_else(|e| {
@@ -548,7 +574,7 @@ fn main() {
     if let Some(sink) = crustagent_audio::RodioSink::new() {
         agent.set_audio_sink(Box::new(sink));
     }
-    if args.iter().any(|a| a == "--say") {
+    if args.iter().any(|a| a == "--tts") {
         agent.set_tts(crustagent::default_engine());
     }
 
@@ -582,7 +608,7 @@ fn main() {
 
     let name = agent.file().default_name().map(|n| n.name.clone()).unwrap_or_default();
     println!("{name}: right-click for a menu · left-drag to move · Esc/Q to quit");
-    println!("(pass --say for audible speech)");
+    println!("(pass --tts for audible speech)");
 
     if dry_run {
         agent.speak("Hello from crustagent!");
@@ -595,6 +621,7 @@ fn main() {
     }
 
     let menu_items = build_menu_items(&agent);
+    let font = load_balloon_font(&agent);
     let mut app = App {
         agent,
         char_window: None,
@@ -615,6 +642,7 @@ fn main() {
         menu_dim: (0, 0),
         cursor: (0, 0),
         last: Instant::now(),
+        font,
         quitting: false,
         quit_deadline: None,
         log_events: args.iter().any(|a| a == "--events"),

@@ -1,20 +1,143 @@
 //! Simple software drawing into a top-down RGBA8 buffer: scaled sprite blit, filled
-//! rectangles, and 8x8 bitmap text (via `font8x8`) for the balloon and menu.
+//! rectangles, an 8x8 bitmap font (via `font8x8`) for the menu, and real anti-aliased
+//! TrueType text (via `fontdue`, with the face discovered by `fontdb`) for the balloon.
 
 use font8x8::legacy::BASIC_LEGACY;
 
 const BSCALE: i32 = 2;
+
+/// A real, anti-aliased text font: a system TrueType face rasterized at a pixel size.
+pub struct Font {
+    face: fontdue::Font,
+    px: f32,
+    ascent: f32,
+    line_h: f32,
+    avg_advance: i32,
+}
+
+impl Font {
+    /// Find a system font for `family` (falling back through common cross-platform sans
+    /// families, then any installed face) and load it at `px` pixels. `None` if the system
+    /// has no usable fonts.
+    pub fn system(family: &str, px: f32, bold: bool, italic: bool) -> Option<Font> {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        let weight = if bold {
+            fontdb::Weight::BOLD
+        } else {
+            fontdb::Weight::NORMAL
+        };
+        let style = if italic {
+            fontdb::Style::Italic
+        } else {
+            fontdb::Style::Normal
+        };
+
+        let mut names: Vec<String> = Vec::new();
+        if !family.is_empty() {
+            names.push(family.to_string());
+        }
+        names.extend(
+            [
+                "Arial",
+                "Helvetica",
+                "Helvetica Neue",
+                "Segoe UI",
+                "DejaVu Sans",
+                "Liberation Sans",
+                "Noto Sans",
+                "Verdana",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+
+        let id = names
+            .iter()
+            .find_map(|n| {
+                db.query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(n)],
+                    weight,
+                    stretch: fontdb::Stretch::Normal,
+                    style,
+                })
+            })
+            .or_else(|| db.faces().next().map(|f| f.id))?;
+
+        let (data, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
+        Font::from_bytes(&data, index, px)
+    }
+
+    /// Parse `data` (TTF/OTF, `index` selects a face in a collection) at `px` pixels.
+    pub fn from_bytes(data: &[u8], index: u32, px: f32) -> Option<Font> {
+        let px = px.max(6.0);
+        let face = fontdue::Font::from_bytes(
+            data,
+            fontdue::FontSettings {
+                collection_index: index,
+                scale: px,
+                ..Default::default()
+            },
+        )
+        .ok()?;
+        let lm = face.horizontal_line_metrics(px);
+        let ascent = lm.map(|m| m.ascent).unwrap_or(px * 0.8);
+        let line_h = lm.map(|m| m.new_line_size).unwrap_or(px * 1.25);
+        let avg_advance = face.metrics('x', px).advance_width.round().max(1.0) as i32;
+        Some(Font {
+            face,
+            px,
+            ascent,
+            line_h,
+            avg_advance,
+        })
+    }
+
+    /// Line-to-line spacing in pixels.
+    pub fn line_height(&self) -> i32 {
+        self.line_h.ceil() as i32
+    }
+
+    /// Typical advance width (of `x`), for sizing a fixed character-count box.
+    pub fn avg_advance(&self) -> i32 {
+        self.avg_advance
+    }
+
+    /// Pixel advance width of `s`.
+    pub fn measure(&self, s: &str) -> i32 {
+        s.chars()
+            .map(|c| self.face.metrics(c, self.px).advance_width)
+            .sum::<f32>()
+            .ceil() as i32
+    }
+}
 pub const MENU_SCALE: i32 = 2;
 /// Height of one menu row, in px.
 pub const MENU_ROW_H: i32 = 8 * MENU_SCALE + 6;
 const PAD: i32 = 6;
 const TAIL_LEN: i32 = 9;
 
-/// The window size (physical px) needed to hold a balloon with `cols`×`rows` characters,
-/// including padding and the tail.
-pub fn balloon_size(cols: usize, rows: usize) -> (u32, u32) {
-    let bw = cols as i32 * 8 * BSCALE + PAD * 2 + 2;
-    let bh = rows as i32 * 8 * BSCALE + PAD * 2 + TAIL_LEN + 2;
+/// The window size (physical px) needed to hold a balloon, including padding and the tail.
+/// Sized to the widest measured `lines`, but at least `min_cols` characters wide (so a
+/// fixed-size box with blank placeholder lines still reserves its full width). With no
+/// `font`, falls back to the 8x8 bitmap metrics.
+pub fn balloon_size(font: Option<&Font>, lines: &[String], min_cols: usize, rows: usize) -> (u32, u32) {
+    let (char_w, line_h) = match font {
+        Some(f) => (f.avg_advance(), f.line_height()),
+        None => (8 * BSCALE, 8 * BSCALE),
+    };
+    let measured = lines
+        .iter()
+        .map(|l| match font {
+            Some(f) => f.measure(l),
+            None => l.chars().count() as i32 * 8 * BSCALE,
+        })
+        .max()
+        .unwrap_or(0);
+    let text_w = measured.max(min_cols as i32 * char_w);
+    let text_h = rows.max(1) as i32 * line_h;
+    let bw = text_w + PAD * 2 + 2;
+    let bh = text_h + PAD * 2 + TAIL_LEN + 2;
     (bw.max(16) as u32, bh.max(16) as u32)
 }
 
@@ -53,6 +176,42 @@ impl<'a> Canvas<'a> {
         self.buf[o + 1] = rgb[1];
         self.buf[o + 2] = rgb[2];
         self.buf[o + 3] = 0xFF;
+    }
+
+    /// Alpha-blend `rgb` over the pixel at `(x, y)` with coverage `a` (0..=255).
+    #[inline]
+    fn blend(&mut self, x: i32, y: i32, rgb: [u8; 3], a: u8) {
+        if a == 0 || x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return;
+        }
+        let o = ((y * self.w + x) * 4) as usize;
+        let inv = 255 - a as u16;
+        for (k, &c) in rgb.iter().enumerate() {
+            self.buf[o + k] = ((c as u16 * a as u16 + self.buf[o + k] as u16 * inv) / 255) as u8;
+        }
+        self.buf[o + 3] = self.buf[o + 3].max(a);
+    }
+
+    /// Draw `s` with a real font, its top edge at `top`, left edge at `x`.
+    fn text_font(&mut self, font: &Font, x: i32, top: i32, s: &str, rgb: [u8; 3]) {
+        let baseline = top + font.ascent.round() as i32;
+        let mut pen = x as f32;
+        for c in s.chars() {
+            let (m, bitmap) = font.face.rasterize(c, font.px);
+            let gx = pen.round() as i32 + m.xmin;
+            let gy = baseline - m.height as i32 - m.ymin;
+            for row in 0..m.height {
+                for col in 0..m.width {
+                    self.blend(
+                        gx + col as i32,
+                        gy + row as i32,
+                        rgb,
+                        bitmap[row * m.width + col],
+                    );
+                }
+            }
+            pen += m.advance_width;
+        }
     }
 
     fn fill_rect(&mut self, x: i32, y: i32, rw: i32, rh: i32, rgb: [u8; 3]) {
@@ -124,39 +283,29 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw a word balloon whose tail points at `(tip_x, tip_y)` — the character's head
-    /// (`below == false`, balloon sits above, tail down) or chin (`below == true`, balloon
-    /// sits below, tail up). A **speech** balloon gets a pointed tail merged into the body;
-    /// a **think** balloon gets a trail of shrinking bubbles. The balloon is kept on-window
-    /// and the tail leans toward `tip_x` so it stays aimed at the character.
+    /// Draw a word balloon filling this (already correctly-sized) window, its tail pointing
+    /// down to the character's head (`below == false`) or up to its chin (`below == true`).
+    /// A **speech** balloon gets a pointed tail merged into the body; a **think** balloon
+    /// gets a trail of shrinking bubbles. Text is drawn with `font` (real TrueType) when
+    /// present, else the 8x8 bitmap fallback.
     pub fn balloon(
         &mut self,
         lines: &[String],
-        tip_x: i32,
-        tip_y: i32,
         below: bool,
         style: &BalloonPaint,
+        font: Option<&Font>,
     ) {
         let (bg, border, text) = (style.bg, style.border, style.text);
-
-        let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as i32;
-        let rows = lines.len() as i32;
-        if rows == 0 {
-            return;
-        }
         let pad = PAD;
-        let bw = cols * 8 * BSCALE + pad * 2;
-        let bh = rows * 8 * BSCALE + pad * 2;
-        let tail_half = 6;
         let tail_len = TAIL_LEN;
+        let tail_half = 6;
 
-        // Body position: centered on the tip, clamped to stay on the window.
-        let bx = (tip_x - bw / 2).clamp(2, (self.w - bw - 2).max(2));
-        let by = if below {
-            tip_y + tail_len
-        } else {
-            tip_y - tail_len - bh
-        };
+        // The body fills the window minus the tail strip.
+        let bx = 0;
+        let bw = self.w;
+        let by = if below { tail_len } else { 0 };
+        let bh = (self.h - tail_len).max(1);
+        let tip_x = self.w / 2;
         let attach_y = if below { by } else { by + bh - 1 };
 
         self.fill_rect(bx, by, bw, bh, bg);
@@ -164,6 +313,7 @@ impl<'a> Canvas<'a> {
         if style.think {
             // Full border, then a trail of shrinking bubbles toward the tip.
             self.stroke_rect(bx, by, bw, bh, border);
+            let tip_y = if below { 0 } else { self.h - 1 };
             let tcx = tip_x.clamp(bx + 8, bx + bw - 8);
             for (t, r) in [(0.32f32, 5i32), (0.62, 4), (0.88, 3)] {
                 let cx = tcx + ((tip_x - tcx) as f32 * t) as i32;
@@ -193,8 +343,13 @@ impl<'a> Canvas<'a> {
             }
         }
 
+        let line_h = font.map(|f| f.line_height()).unwrap_or(8 * BSCALE);
         for (i, line) in lines.iter().enumerate() {
-            self.text(bx + pad, by + pad + i as i32 * 8 * BSCALE, BSCALE, line, text);
+            let ty = by + pad + i as i32 * line_h;
+            match font {
+                Some(f) => self.text_font(f, bx + pad, ty, line, text),
+                None => self.text(bx + pad, ty, BSCALE, line, text),
+            }
         }
     }
 
