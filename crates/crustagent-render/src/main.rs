@@ -74,29 +74,40 @@ fn frame_empty(agent: &Agent, name: &str, first: bool) -> bool {
         || matches!(file.composite_frame(frame, None), Ok(img) if img.is_fully_transparent())
 }
 
-/// Load a real balloon font, matching the character's requested family/size/weight where
-/// possible (falling back to a system sans). `None` if the system has no usable fonts, in
-/// which case the balloon degrades to the 8x8 bitmap font.
-fn load_balloon_font(agent: &Agent) -> Option<paint::Font> {
-    let (family, px, bold, italic) = match agent.file().balloon.as_ref() {
-        Some(b) => (
-            b.font_name.clone(),
-            font_px(b.font_height),
-            b.bold,
-            b.italic,
-        ),
-        None => (String::new(), 18.0, false, false),
-    };
-    paint::Font::system(&family, px, bold, italic)
+/// The character's requested balloon font: family, size in **logical** points, weight.
+/// The actual pixel size is `pt × scale_factor`, resolved per display (see [`App::ensure_font`]).
+struct FontSpec {
+    family: String,
+    pt: f32,
+    bold: bool,
+    italic: bool,
 }
 
-/// Turn a LOGFONT `lfHeight` (device units, often negative) into a readable pixel size.
-fn font_px(lf_height: i32) -> f32 {
+fn balloon_font_spec(agent: &Agent) -> FontSpec {
+    match agent.file().balloon.as_ref() {
+        Some(b) => FontSpec {
+            family: b.font_name.clone(),
+            pt: font_pt(b.font_height),
+            bold: b.bold,
+            italic: b.italic,
+        },
+        None => FontSpec {
+            family: String::new(),
+            pt: 15.0,
+            bold: false,
+            italic: false,
+        },
+    }
+}
+
+/// Turn a LOGFONT `lfHeight` (logical device units, often negative) into a readable point
+/// size, clamped so odd files don't produce microscopic or giant text.
+fn font_pt(lf_height: i32) -> f32 {
     let p = lf_height.unsigned_abs() as f32;
     if p < 1.0 {
-        18.0
+        15.0
     } else {
-        p.clamp(15.0, 40.0)
+        p.clamp(12.0, 28.0)
     }
 }
 
@@ -154,8 +165,11 @@ struct App {
     cursor: (i32, i32),
     last: Instant,
 
-    // real balloon font (system TrueType), chosen from the character's balloon config
+    // real balloon font (system TrueType); built lazily at the display's scale factor so
+    // the text is DPI-correct (the balloon buffer is in physical pixels)
+    font_spec: FontSpec,
     font: Option<paint::Font>,
+    font_scale: f32,
 
     // graceful shutdown: play Goodbye + Hide before exiting
     quitting: bool,
@@ -310,6 +324,18 @@ impl App {
         canvas.menu_list(&labels, scroll, hover);
     }
 
+    /// (Re)build the balloon font at `scale` physical pixels per logical point, so text is
+    /// crisp and correctly sized on HiDPI displays. Cheap no-op if already built for `scale`.
+    fn ensure_font(&mut self, scale: f32) {
+        let scale = if scale > 0.1 { scale } else { 1.0 };
+        if self.font.is_some() && (self.font_scale - scale).abs() < 0.01 {
+            return;
+        }
+        let s = &self.font_spec;
+        self.font = paint::Font::system(&s.family, (s.pt * scale).max(8.0), s.bold, s.italic);
+        self.font_scale = scale;
+    }
+
     fn compose_balloon(&mut self, w: u32, h: u32) {
         let balloon = self.agent.balloon();
         let below = self.balloon_below;
@@ -344,6 +370,7 @@ impl ApplicationHandler for App {
             &format!("crustagent — {name}"),
         );
         win.request_redraw();
+        self.ensure_font(win.scale_factor() as f32);
         self.char_presenter = Some(WgpuPresenter::new(win.clone()));
         self.char_window = Some(win);
     }
@@ -360,6 +387,12 @@ impl ApplicationHandler for App {
                 } else {
                     self.begin_quit();
                 }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } if is_char => {
+                // Moved to a display with a different DPI: rebuild the font and force the
+                // balloon window to re-size to the new metrics.
+                self.ensure_font(scale_factor as f32);
+                self.balloon_dim = (0, 0);
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 match event.physical_key {
@@ -500,6 +533,9 @@ impl ApplicationHandler for App {
 
         // Balloon window: size once per phrase, keep it, show/hide as speech starts/stops.
         if let Some(bv) = self.agent.balloon() {
+            if let Some(scale) = self.char_window.as_ref().map(|w| w.scale_factor() as f32) {
+                self.ensure_font(scale);
+            }
             let (bw, bh) =
                 paint::balloon_size(self.font.as_ref(), &bv.full.lines, bv.full.cols, bv.full.rows);
             self.ensure_balloon_window(el, bw, bh);
@@ -525,7 +561,7 @@ fn main() {
 
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
-        let font = paint::Font::system("", 20.0, false, false);
+        let font = paint::Font::system("", 30.0, false, false); // ~15pt at 2× (retina) scale
         let style = |think| paint::BalloonPaint {
             bg: [0xFF, 0xFF, 0xE1],
             border: [0x40, 0x40, 0x40],
@@ -621,7 +657,7 @@ fn main() {
     }
 
     let menu_items = build_menu_items(&agent);
-    let font = load_balloon_font(&agent);
+    let font_spec = balloon_font_spec(&agent);
     let mut app = App {
         agent,
         char_window: None,
@@ -642,7 +678,9 @@ fn main() {
         menu_dim: (0, 0),
         cursor: (0, 0),
         last: Instant::now(),
-        font,
+        font_spec,
+        font: None,
+        font_scale: 0.0,
         quitting: false,
         quit_deadline: None,
         log_events: args.iter().any(|a| a == "--events"),
