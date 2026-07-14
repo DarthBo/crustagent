@@ -12,7 +12,6 @@ workspace = true
 crustagent = { path = "../crustagent" }
 crustagent-format = { path = "../crustagent-format" }
 winit = "0.30"
-softbuffer = "0.4"
 wgpu = "22"
 pollster = "0.3"
 font8x8 = "0.3"

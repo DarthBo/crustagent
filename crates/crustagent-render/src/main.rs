@@ -1,16 +1,16 @@
-//! A windowed viewer that plays a Microsoft Agent character, driven by the `crustagent`
-//! embedding API.
+//! A viewer that plays a Microsoft Agent character on the desktop, driven by the
+//! `crustagent` embedding API.
 //!
-//! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--float] [--say]`
+//! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--say]`
 //!
-//! Two windows, MS-Agent-style: a tight, non-resizable **character** window, and a
-//! separate **balloon** window that appears above (or below, near the screen top) the
-//! character while it speaks. The character idles by default.
+//! Two borderless, transparent, always-on-top windows (via `wgpu`), MS-Agent-style: a
+//! tight, non-resizable **character** window, and a separate **balloon** window that
+//! appears above (or below, near the screen top) the character while it speaks. The
+//! character idles by default.
 //!
 //! Interaction: **left-drag** moves the character, **right-click** opens a command menu
-//! (left-click an item to run it), **Esc/Q** quits. `--float` renders both windows
-//! transparent/borderless/always-on-top (via `wgpu`); otherwise `softbuffer` windows on a
-//! checkerboard. `--say` uses a real audio TTS backend (macOS).
+//! (left-click an item to run it), **Esc/Q** quits. `--say` uses a real audio TTS backend
+//! (macOS).
 
 mod paint;
 mod png;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crustagent::{Agent, Request};
-use present::{Presenter, SoftPresenter, WgpuPresenter};
+use present::WgpuPresenter;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -81,57 +81,26 @@ fn build_menu(agent: &Agent, x: i32, y: i32) -> Menu {
     Menu { x, y, items }
 }
 
-fn make_window(el: &ActiveEventLoop, w: u32, h: u32, float: bool, title: &str) -> Arc<Window> {
-    let mut attrs = Window::default_attributes()
+fn make_window(el: &ActiveEventLoop, w: u32, h: u32, title: &str) -> Arc<Window> {
+    let attrs = Window::default_attributes()
         .with_title(title)
         .with_resizable(false)
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_window_level(WindowLevel::AlwaysOnTop)
         .with_inner_size(PhysicalSize::new(w, h));
-    if float {
-        attrs = attrs
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_window_level(WindowLevel::AlwaysOnTop);
-    }
     Arc::new(el.create_window(attrs).expect("create window"))
-}
-
-fn make_presenter(float: bool, window: Arc<Window>) -> Box<dyn Presenter> {
-    if float {
-        Box::new(WgpuPresenter::new(window))
-    } else {
-        Box::new(SoftPresenter::new(window))
-    }
-}
-
-fn fill_bg(buf: &mut [u8], w: u32, h: u32, float: bool) {
-    for y in 0..h {
-        for x in 0..w {
-            let o = ((y * w + x) * 4) as usize;
-            let (r, g, b, a) = if float {
-                (0, 0, 0, 0)
-            } else if ((x / 16) + (y / 16)).is_multiple_of(2) {
-                (0xC8, 0xC8, 0xC8, 0xFF)
-            } else {
-                (0x90, 0x90, 0x90, 0xFF)
-            };
-            buf[o] = r;
-            buf[o + 1] = g;
-            buf[o + 2] = b;
-            buf[o + 3] = a;
-        }
-    }
 }
 
 struct App {
     agent: Agent,
-    float: bool,
 
     char_window: Option<Arc<Window>>,
-    char_presenter: Option<Box<dyn Presenter>>,
+    char_presenter: Option<WgpuPresenter>,
     char_scratch: Vec<u8>,
 
     balloon_window: Option<Arc<Window>>,
-    balloon_presenter: Option<Box<dyn Presenter>>,
+    balloon_presenter: Option<WgpuPresenter>,
     balloon_scratch: Vec<u8>,
     balloon_dim: (u32, u32),
     balloon_below: bool,
@@ -145,9 +114,9 @@ impl App {
     /// Create the balloon window on first use, then keep it (shown/hidden per phrase).
     fn ensure_balloon_window(&mut self, el: &ActiveEventLoop, w: u32, h: u32) {
         if self.balloon_window.is_none() {
-            let win = make_window(el, w, h, self.float, "crustagent balloon");
+            let win = make_window(el, w, h, "crustagent balloon");
             win.set_visible(false);
-            self.balloon_presenter = Some(make_presenter(self.float, win.clone()));
+            self.balloon_presenter = Some(WgpuPresenter::new(win.clone()));
             self.balloon_window = Some(win);
             self.balloon_dim = (w, h);
         } else if self.balloon_dim != (w, h) {
@@ -180,9 +149,8 @@ impl App {
     fn compose_char(&mut self, w: u32, h: u32) {
         let img = self.agent.composite_current();
         let menu = self.menu.clone();
-        let float = self.float;
-        self.char_scratch.resize((w * h * 4) as usize, 0);
-        fill_bg(&mut self.char_scratch, w, h, float);
+        self.char_scratch.clear();
+        self.char_scratch.resize((w * h * 4) as usize, 0); // transparent
 
         let mut canvas = paint::Canvas::new(&mut self.char_scratch, w, h);
         if let Some(img) = &img {
@@ -199,10 +167,9 @@ impl App {
 
     fn compose_balloon(&mut self, w: u32, h: u32) {
         let balloon = self.agent.balloon();
-        let float = self.float;
         let below = self.balloon_below;
-        self.balloon_scratch.resize((w * h * 4) as usize, 0);
-        fill_bg(&mut self.balloon_scratch, w, h, float);
+        self.balloon_scratch.clear();
+        self.balloon_scratch.resize((w * h * 4) as usize, 0); // transparent
 
         if let Some(bv) = &balloon {
             let mut canvas = paint::Canvas::new(&mut self.balloon_scratch, w, h);
@@ -233,11 +200,10 @@ impl ApplicationHandler for App {
             el,
             cw * SCALE as u32,
             ch * SCALE as u32,
-            self.float,
             &format!("crustagent — {name}"),
         );
         win.request_redraw();
-        self.char_presenter = Some(make_presenter(self.float, win.clone()));
+        self.char_presenter = Some(WgpuPresenter::new(win.clone()));
         self.char_window = Some(win);
     }
 
@@ -330,7 +296,6 @@ impl ApplicationHandler for App {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let float = args.iter().any(|a| a == "--float");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
@@ -349,7 +314,7 @@ fn main() {
 
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let Some(path) = positional.first().map(|s| (*s).clone()) else {
-        eprintln!("usage: crustagent-render <file.acs> [Animation] [--float] [--say]");
+        eprintln!("usage: crustagent-render <file.acs> [Animation] [--say]");
         std::process::exit(2);
     };
     let mut agent = Agent::load(&path).unwrap_or_else(|e| {
@@ -389,7 +354,6 @@ fn main() {
 
     let mut app = App {
         agent,
-        float,
         char_window: None,
         char_presenter: None,
         char_scratch: Vec::new(),

@@ -33,7 +33,7 @@ crates/
 
 The viewer uses two windows, MS-Agent-style: a **tight, non-resizable character window**
 and a **separate balloon window** that appears above the character (or below, near the
-screen top) while it speaks. `--float` makes both transparent/borderless/always-on-top.
+screen top) while it speaks. Both are transparent, borderless, and always-on-top (`wgpu`).
 
 ### Embed it
 
@@ -105,21 +105,18 @@ cargo run -p crustagent-format --example render   -- assets/agents/Merlin.acs Gr
 cargo run -p crustagent-core   --example sequence -- assets/agents/Merlin.acs Greet     # print the timeline
 cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs GetAttention  # gesture -> GIF
 
-# See it on screen:
-cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles on a checkerboard
-cargo run -p crustagent-render -- assets/agents/Merlin.acs --float          # floating desktop buddy (wgpu)
-cargo run -p crustagent-render -- assets/agents/Merlin.acs --float --say    # ...and audible (macOS `say`)
+# See it on your desktop (transparent, always-on-top):
+cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles
+cargo run -p crustagent-render -- assets/agents/Merlin.acs --say            # ...and audible (macOS `say`)
 cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention     # loop a specific gesture
 ```
 
 With no animation named, the character **idles** — escalating `IDLINGLEVEL` animations,
 like the assistant standing around. Name one to loop that gesture instead. **Drag** the
-character with the left mouse button; **Esc/Q** quits.
+character with the left mouse button; **right-click** for a command menu; **Esc/Q** quits.
 
-Two presentation backends: the default opaque window draws on a transparency checkerboard
-(`softbuffer`, works everywhere); `--float` is a borderless, always-on-top, **transparent**
-window rendered with `wgpu` (premultiplied-alpha surface) for the real floating
-desktop-buddy effect.
+The window is a borderless, transparent, always-on-top `wgpu` surface (premultiplied
+alpha) so the character floats on the desktop.
 
 ## Provenance & license
 

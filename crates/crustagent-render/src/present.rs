@@ -1,59 +1,9 @@
-//! Presentation backends. `SoftPresenter` (softbuffer) draws an opaque window — used for
-//! the checkerboard/windowed mode, works everywhere. `WgpuPresenter` renders the frame as
-//! a texture over a transparent surface with a premultiplied-alpha composite mode — used
-//! for `--float` (the borderless desktop-buddy window) where real per-pixel transparency
-//! is needed. Both take a window-sized top-down RGBA8 buffer.
+//! Presentation via `wgpu`: the composited frame is uploaded as a texture and drawn over
+//! a **transparent** surface (premultiplied-alpha composite mode), giving the borderless,
+//! per-pixel-transparent desktop window. Takes a window-sized top-down RGBA8 buffer.
 
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use winit::window::Window;
-
-/// Presents a window-sized RGBA8 (top-down) buffer to the window.
-pub trait Presenter {
-    fn present(&mut self, rgba: &[u8], w: u32, h: u32);
-}
-
-// ---------------------------------------------------------------------------
-// softbuffer (opaque)
-// ---------------------------------------------------------------------------
-
-pub struct SoftPresenter {
-    _context: softbuffer::Context<Arc<Window>>,
-    surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
-}
-
-impl SoftPresenter {
-    pub fn new(window: Arc<Window>) -> SoftPresenter {
-        let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        let surface = softbuffer::Surface::new(&context, window).expect("softbuffer surface");
-        SoftPresenter {
-            _context: context,
-            surface,
-        }
-    }
-}
-
-impl Presenter for SoftPresenter {
-    fn present(&mut self, rgba: &[u8], w: u32, h: u32) {
-        let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
-            return;
-        };
-        self.surface.resize(nw, nh).expect("resize");
-        let mut buf = self.surface.buffer_mut().expect("buffer");
-        for (i, px) in buf.iter_mut().enumerate() {
-            let o = i * 4;
-            let r = rgba[o] as u32;
-            let g = rgba[o + 1] as u32;
-            let b = rgba[o + 2] as u32;
-            *px = (r << 16) | (g << 8) | b;
-        }
-        buf.present().expect("present");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// wgpu (transparent, per-pixel alpha)
-// ---------------------------------------------------------------------------
 
 const SHADER: &str = r#"
 struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -265,8 +215,9 @@ impl WgpuPresenter {
     }
 }
 
-impl Presenter for WgpuPresenter {
-    fn present(&mut self, rgba: &[u8], w: u32, h: u32) {
+impl WgpuPresenter {
+    /// Upload `rgba` (window-sized, top-down) and present it over the transparent surface.
+    pub fn present(&mut self, rgba: &[u8], w: u32, h: u32) {
         if w == 0 || h == 0 {
             return;
         }
