@@ -93,10 +93,11 @@ fn exit_branching_gesture_plays_its_return() {
     assert!(agent.file().animation("Pleased").is_some());
     agent.play("Pleased");
     agent.update(16); // start the gesture
-    assert!(!agent.is_idle());
+    assert!(agent.is_gesturing());
 
+    // Measure how long the gesture itself runs (before the idle rest pause).
     let mut elapsed = 16u32;
-    while !agent.is_idle() && elapsed < 5000 {
+    while agent.is_gesturing() && elapsed < 5000 {
         agent.update(16);
         elapsed += 16;
     }

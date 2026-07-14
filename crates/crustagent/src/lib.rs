@@ -72,6 +72,9 @@ pub struct BalloonView {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Activity {
     Hidden,
+    /// Holding the rest pose between idle animations (standing still).
+    IdleRest,
+    /// Playing an idle animation.
     Idle,
     Gesture,
     Hiding,
@@ -165,9 +168,15 @@ impl Agent {
         (self.file.header.image_size.0 as u32, self.file.header.image_size.1 as u32)
     }
 
-    /// Whether the character is currently auto-idling (queue empty, nothing playing).
+    /// Whether the character is currently auto-idling (an idle animation or the rest
+    /// pause between them).
     pub fn is_idle(&self) -> bool {
-        matches!(self.activity, Activity::Idle)
+        matches!(self.activity, Activity::Idle | Activity::IdleRest)
+    }
+
+    /// Whether a `Play`ed gesture is currently running.
+    pub fn is_gesturing(&self) -> bool {
+        matches!(self.activity, Activity::Gesture)
     }
 
     /// Whether the character is currently shown.
@@ -222,7 +231,12 @@ impl Agent {
     /// Advance by `dt_ms` milliseconds.
     pub fn update(&mut self, dt_ms: u32) {
         // Idle/hidden yields immediately to any queued request.
-        if !self.queue.is_empty() && matches!(self.activity, Activity::Idle | Activity::Hidden) {
+        if !self.queue.is_empty()
+            && matches!(
+                self.activity,
+                Activity::Idle | Activity::IdleRest | Activity::Hidden
+            )
+        {
             self.next();
         }
 
@@ -250,7 +264,7 @@ impl Agent {
                     self.next();
                 }
             }
-            Activity::Wait => {
+            Activity::Wait | Activity::IdleRest => {
                 if self.track_elapsed_ms >= self.track_total_ms {
                     self.next();
                 }
@@ -274,7 +288,12 @@ impl Agent {
         if let Some(req) = self.queue.pop_front() {
             self.start(req);
         } else if self.visible {
-            self.start_idle();
+            // Alternate: rest a beat, then one idle animation, then rest again.
+            if self.activity == Activity::IdleRest {
+                self.start_idle_animation();
+            } else {
+                self.start_idle_rest();
+            }
         } else {
             self.activity = Activity::Hidden;
         }
@@ -290,7 +309,7 @@ impl Agent {
                 self.start_state("HIDING", false, Activity::Hiding);
             }
             Request::Play(name) => {
-                let frames = self.build_gesture_frames(&name);
+                let frames = self.build_gesture_frames(&name, false);
                 self.install_track(frames, false);
                 self.activity = Activity::Gesture;
             }
@@ -322,13 +341,25 @@ impl Agent {
         }
     }
 
-    fn start_idle(&mut self) {
+    /// Stand at rest for a randomized pause before the next idle animation.
+    fn start_idle_rest(&mut self) {
+        self.build_rest_track();
+        self.track_total_ms = 1500 + (self.rng.next_u64() % 3000) as u32; // 1.5–4.5s
+        self.track_elapsed_ms = 0;
+        self.activity = Activity::IdleRest;
+    }
+
+    /// Play one idle animation (with its exit-return so it ends back at rest).
+    fn start_idle_animation(&mut self) {
         let name = {
             let ch = Character::new(&self.file);
             self.idle.next_idle(&ch, &mut self.rng)
         };
-        match name.and_then(|n| self.anim_index(&n)) {
-            Some(idx) => self.build_track(&[idx], false),
+        match name {
+            Some(n) => {
+                let frames = self.build_gesture_frames(&n, true);
+                self.install_track(frames, false);
+            }
             None => self.build_rest_track(),
         }
         self.activity = Activity::Idle;
@@ -389,11 +420,12 @@ impl Agent {
         }
     }
 
-    /// Build the full track for a `Play`d gesture: each part's forward walk, plus — for a
-    /// part whose return is `ExitBranching` (returnType 1, e.g. Merlin's `Pleased`) — its
-    /// *exit* walk, so the character reverses out of the pose back to rest instead of
-    /// freezing mid-gesture and snapping to idle.
-    fn build_gesture_frames(&mut self, name: &str) -> Vec<TrackFrame> {
+    /// Build the full track for a gesture: each part's forward walk, plus — when the part
+    /// declares `ExitBranching` (returnType 1, e.g. Merlin's `Pleased`) or `force_return`
+    /// is set — its *exit* walk, so it winds back to rest instead of freezing mid-motion
+    /// and snapping away. `force_return` is used for idle animations: their forward walk
+    /// often stops mid-loop, and following the exit frames returns them cleanly to rest.
+    fn build_gesture_frames(&mut self, name: &str, force_return: bool) -> Vec<TrackFrame> {
         let indices: Vec<usize> = {
             let ch = Character::new(&self.file);
             ch.full_gesture(name)
@@ -407,7 +439,7 @@ impl Agent {
             self.append_forward(&mut track, idx);
 
             let anim = &self.file.animations[idx];
-            if anim.return_kind == ReturnKind::ExitBranching {
+            if force_return || anim.return_kind == ReturnKind::ExitBranching {
                 // Continue the exit branch from where the forward walk ended.
                 if let Some(last) = track.get(before..).and_then(|s| s.last()) {
                     let exit_from = anim.frames[last.frame].exit_frame;
