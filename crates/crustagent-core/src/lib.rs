@@ -9,10 +9,12 @@
 //! - [`player`] — drive a sequence against a monotonic clock (looping, completion).
 //! - [`character`] — name/state → animation resolution over a parsed character file.
 //! - [`idle`] — escalating auto-idle animation selection.
+//! - [`motion`] — directional-state selection + position interpolation for moves.
+//! - [`balloon`] — word-balloon text layout (wrapping).
 //! - [`text`] — parse `Speak`/`Think` markup into display words + a speech directive stream.
 //! - [`rng`] — deterministic, injectable branch randomness.
 //!
-//! Planned: the action queue and move interpolation.
+//! Planned: the serial action queue.
 //!
 //! ```
 //! use crustagent_core::{sequence_animation, Player, SplitMix64};
@@ -27,15 +29,19 @@
 //! assert_eq!(player.current_frame(), Some(0));
 //! ```
 
+pub mod balloon;
 pub mod character;
 pub mod idle;
+pub mod motion;
 pub mod player;
 pub mod rng;
 pub mod sequence;
 pub mod text;
 
+pub use balloon::{wrap_words, BalloonLayout};
 pub use character::Character;
 pub use idle::IdleDirector;
+pub use motion::{Direction, MoveTo};
 pub use player::Player;
 pub use rng::{BranchRng, SplitMix64};
 pub use sequence::{
