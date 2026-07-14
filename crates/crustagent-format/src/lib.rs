@@ -8,10 +8,13 @@
 //! The byte-level format was reverse-engineered from the original character files.
 //!
 //! Currently implemented:
-//! - **ACS 2.0** ([`AcsFile`]) — the compiled binary format, incl. LZ77 image
+//! - **ACS 2.0** ([`AcsFile`]) — the compiled binary format (full), incl. LZ77 image
 //!   decompression ([`decode::decode_data`]).
+//! - **ACF** ([`AcfFile`]) — the uncompiled format's *header* (metadata + animation
+//!   references to external `.aca` files); `.aca` frame/image loading is TODO.
 //!
-//! Planned: ACS 1.5 (OLE2), ACF (+ external `.aca`), ACD.
+//! Planned: `.aca` bodies, ACS 1.5 (OLE2 compound document),
+//! and ACD (text script).
 //!
 //! ```no_run
 //! use crustagent_format::AcsFile;
@@ -22,12 +25,15 @@
 //! # Ok::<(), crustagent_format::Error>(())
 //! ```
 
+pub mod acf;
 pub mod acs;
+mod blocks;
 pub mod decode;
 pub mod error;
 pub mod model;
 pub mod reader;
 
+pub use acf::{AcfAnimationRef, AcfFile, ACF_SIGNATURE};
 pub use acs::{signature, AcsFile, ACS_SIGNATURE};
 pub use error::{Error, Result};
 pub use model::{

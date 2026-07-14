@@ -267,20 +267,20 @@ fn parse_header_block(data: &[u8], blk: Block) -> Result<HeaderBlock> {
     let _unknown = c.u32()?; // always 2
 
     let tts = if style & char_style::TTS != 0 {
-        Some(parse_tts(&mut c)?)
+        Some(crate::blocks::tts(&mut c, true)?)
     } else {
         None
     };
     let balloon = if style & char_style::BALLOON != 0 {
-        Some(parse_balloon(&mut c)?)
+        Some(crate::blocks::balloon(&mut c, true)?)
     } else {
         None
     };
-    let palette = parse_palette(&mut c)?;
-    skip_icon(&mut c)?;
+    let palette = crate::blocks::palette(&mut c)?;
+    crate::blocks::skip_icon(&mut c)?;
 
     // States occupy the cursor position through the start of names.
-    let states = parse_states(&mut c)?;
+    let states = crate::blocks::states(&mut c, true)?;
 
     // Names live at an absolute file offset; rebase into the header block.
     let names_offset = names_offset_abs
@@ -288,7 +288,7 @@ fn parse_header_block(data: &[u8], blk: Block) -> Result<HeaderBlock> {
         .ok_or_else(|| Error::InvalidData("names offset precedes header block".into()))?;
     let names = {
         let mut nc = Cursor::at(block, names_offset);
-        parse_names(&mut nc)?
+        crate::blocks::names(&mut nc, true)?
     };
 
     let header = FileHeader {
@@ -307,133 +307,6 @@ fn parse_header_block(data: &[u8], blk: Block) -> Result<HeaderBlock> {
         names,
         states,
     })
-}
-
-fn parse_tts(c: &mut Cursor) -> Result<Tts> {
-    let engine = c.guid()?;
-    let mode = c.guid()?;
-    let speed = c.i32()?;
-    let pitch = c.i16()?;
-    let has_extra = c.u8()? != 0;
-    if has_extra {
-        let language = c.u16()?;
-        let _unknown = c.string(true)?;
-        let gender = c.u16()?;
-        let age = c.u16()?;
-        let style = c.string(true)?;
-        Ok(Tts {
-            engine,
-            mode,
-            speed,
-            pitch,
-            language: Some(language),
-            gender,
-            age,
-            style,
-        })
-    } else {
-        Ok(Tts {
-            engine,
-            mode,
-            speed,
-            pitch,
-            language: None,
-            gender: 0,
-            age: 0,
-            style: String::new(),
-        })
-    }
-}
-
-fn parse_balloon(c: &mut Cursor) -> Result<Balloon> {
-    let lines = c.u8()?;
-    let per_line = c.u8()?;
-    let fg_color = c.color()?;
-    let bg_color = c.color()?;
-    let border_color = c.color()?;
-    let font_name = c.string(true)?;
-    let font_height = c.i32()?;
-    let weight = c.u16()?;
-    let strikeout = c.u16()?;
-    let italic = c.u16()?;
-    Ok(Balloon {
-        lines,
-        per_line,
-        fg_color,
-        bg_color,
-        border_color,
-        font_name,
-        font_height,
-        bold: weight >= 700, // FW_BOLD
-        strikeout: strikeout != 0,
-        italic: italic != 0,
-    })
-}
-
-fn parse_palette(c: &mut Cursor) -> Result<Vec<Color>> {
-    let count = c.u32()? as usize;
-    let mut palette = Vec::with_capacity(count.min(256));
-    for i in 0..count {
-        let color = c.color()?;
-        if i < 256 {
-            palette.push(color);
-        }
-    }
-    Ok(palette)
-}
-
-fn skip_icon(c: &mut Cursor) -> Result<()> {
-    let has_icon = c.u8()?;
-    if has_icon != 0 {
-        let mask_size = c.u32()? as usize;
-        c.skip(mask_size)?;
-        let color_size = c.u32()? as usize;
-        c.skip(color_size)?;
-    }
-    Ok(())
-}
-
-fn parse_states(c: &mut Cursor) -> Result<Vec<State>> {
-    let count = c.u16()?;
-    let mut states = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let name = c.string(true)?;
-        let gesture_count = c.u16()?;
-        let mut animations = Vec::with_capacity(gesture_count as usize);
-        for _ in 0..gesture_count {
-            animations.push(c.string(true)?);
-        }
-        states.push(State { name, animations });
-    }
-    Ok(states)
-}
-
-fn parse_names(c: &mut Cursor) -> Result<Vec<Name>> {
-    let count = c.u16()?;
-    let mut names = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let language = c.u16()?;
-        let name = first_letter_caps(c.string(true)?);
-        let desc1 = c.string(true)?;
-        let desc2 = c.string(true)?;
-        names.push(Name {
-            language,
-            name,
-            desc1,
-            desc2,
-        });
-    }
-    Ok(names)
-}
-
-fn first_letter_caps(s: String) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) if first.is_lowercase() => {
-            first.to_uppercase().collect::<String>() + chars.as_str()
-        }
-        _ => s,
-    }
 }
 
 fn parse_index(data: &[u8], blk: Block) -> Result<Vec<Block>> {
