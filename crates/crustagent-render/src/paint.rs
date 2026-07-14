@@ -91,9 +91,11 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw a speech balloon centered horizontally near the top, with a downward tail
-    /// that merges into the body (no border line cutting across the join).
-    pub fn balloon(&mut self, lines: &[String]) {
+    /// Draw a speech balloon whose tail points at `(tip_x, tip_y)` — the character's head
+    /// (`below == false`, balloon sits above, tail down) or chin (`below == true`, balloon
+    /// sits below, tail up). The tail merges into the body, the balloon is kept on-window,
+    /// and the tail leans toward `tip_x` so it stays aimed at the character.
+    pub fn balloon(&mut self, lines: &[String], tip_x: i32, tip_y: i32, below: bool) {
         let bg = [0xFF, 0xFF, 0xE8];
         let border = [0x40, 0x40, 0x40];
         let text = [0x10, 0x10, 0x10];
@@ -106,34 +108,41 @@ impl<'a> Canvas<'a> {
         let pad = 6;
         let bw = cols * 8 * BSCALE + pad * 2;
         let bh = rows * 8 * BSCALE + pad * 2;
-        let bx = (self.w - bw) / 2;
-        let by = 6;
-
         let tail_half = 6;
         let tail_len = 9;
-        let bottom = by + bh - 1;
-        let tip_x = (bx + bw / 2).clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
 
-        // body + tail fill (tail overlaps the bottom edge so it connects seamlessly)
+        // Body position: centered on the tip, clamped to stay on the window.
+        let bx = (tip_x - bw / 2).clamp(2, (self.w - bw - 2).max(2));
+        let by = if below {
+            tip_y + tail_len
+        } else {
+            tip_y - tail_len - bh
+        };
+        // Tail attaches at the body edge nearest the tip; its base leans toward tip_x.
+        let attach_y = if below { by } else { by + bh - 1 };
+        let far_y = if below { by + bh - 1 } else { by };
+        let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
+
+        // body + tail fill
         self.fill_rect(bx, by, bw, bh, bg);
         for row in 0..=tail_len {
             let half = tail_half - row * tail_half / tail_len;
-            let y = bottom + row;
-            self.fill_rect(tip_x - half, y, half * 2 + 1, 1, bg);
-            self.put(tip_x - half, y, border); // slanted left edge
-            self.put(tip_x + half, y, border); // slanted right edge
+            let y = if below { attach_y - row } else { attach_y + row };
+            self.fill_rect(tcx - half, y, half * 2 + 1, 1, bg);
+            self.put(tcx - half, y, border);
+            self.put(tcx + half, y, border);
         }
 
-        // outline: top + sides, and the bottom edge *except* the tail gap
-        for x in bx..bx + bw {
-            self.put(x, by, border);
-            if x < tip_x - tail_half || x > tip_x + tail_half {
-                self.put(x, bottom, border);
-            }
-        }
+        // outline: sides, the far edge in full, and the attach edge with a tail gap
         for y in by..by + bh {
             self.put(bx, y, border);
             self.put(bx + bw - 1, y, border);
+        }
+        for x in bx..bx + bw {
+            self.put(x, far_y, border);
+            if x < tcx - tail_half || x > tcx + tail_half {
+                self.put(x, attach_y, border);
+            }
         }
 
         for (i, line) in lines.iter().enumerate() {

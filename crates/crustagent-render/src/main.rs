@@ -86,6 +86,7 @@ struct App {
     scratch: Vec<u8>,
     cursor: (i32, i32),
     menu: Option<Menu>,
+    balloon_below: bool,
     last: Instant,
     window: Option<Arc<Window>>,
     presenter: Option<Box<dyn Presenter>>,
@@ -98,6 +99,8 @@ impl App {
         let balloon = self.agent.balloon();
         let menu = self.menu.clone();
         let float = self.float;
+        let below = self.balloon_below;
+        let char_h = self.agent.size().1 as i32;
 
         let w = win_w as i32;
         self.scratch.resize((win_w * win_h * 4) as usize, 0);
@@ -129,9 +132,11 @@ impl App {
             let ox = (w - cw * SCALE) / 2;
             canvas.blit_scaled(&img.pixels, cw, img.height as i32, ox, STRIP, SCALE);
         }
-        // balloon
+        // balloon: tail points at the character's head (or chin, when flipped below)
         if let Some(b) = &balloon {
-            canvas.balloon(&b.layout.lines);
+            let tip_x = w / 2;
+            let tip_y = if below { STRIP + char_h * SCALE } else { STRIP };
+            canvas.balloon(&b.layout.lines, tip_x, tip_y, below);
         }
         // menu
         if let Some(m) = &menu {
@@ -147,7 +152,8 @@ impl ApplicationHandler for App {
         }
         let (cw, ch) = self.agent.size();
         let win_w = (cw as i32 * SCALE).max(320);
-        let win_h = ch as i32 * SCALE + STRIP;
+        // Reserve a balloon strip above *and* below the character so the balloon can flip.
+        let win_h = ch as i32 * SCALE + 2 * STRIP;
         let name = self
             .agent
             .file()
@@ -214,6 +220,12 @@ impl ApplicationHandler for App {
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
+                // Flip the balloon below the character when the window is near the top of
+                // the screen (not enough room above for the balloon).
+                self.balloon_below = window
+                    .outer_position()
+                    .map(|p| p.y < STRIP)
+                    .unwrap_or(false);
                 self.compose(size.width, size.height);
                 if let Some(p) = self.presenter.as_mut() {
                     p.present(&self.scratch, size.width, size.height);
@@ -252,7 +264,7 @@ fn main() {
             px[3] = 0xFF;
         }
         let mut canvas = paint::Canvas::new(&mut buf, w, h);
-        canvas.balloon(&["Hello from crustagent!".to_string()]);
+        canvas.balloon(&["Hello from crustagent!".to_string()], (w / 2) as i32, 108, false);
         std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
         println!("wrote {out}");
         return;
@@ -301,6 +313,7 @@ fn main() {
         scratch: Vec::new(),
         cursor: (0, 0),
         menu: None,
+        balloon_below: false,
         last: Instant::now(),
         window: None,
         presenter: None,
