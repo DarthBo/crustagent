@@ -1,11 +1,12 @@
 //! Simple software drawing into a top-down RGBA8 buffer: scaled sprite blit, filled
 //! rectangles, and 8x8 bitmap text (via `font8x8`) for the balloon and menu.
 
-use crustagent::Request;
 use font8x8::legacy::BASIC_LEGACY;
 
 const BSCALE: i32 = 2;
-const MENU_SCALE: i32 = 2;
+pub const MENU_SCALE: i32 = 2;
+/// Height of one menu row, in px.
+pub const MENU_ROW_H: i32 = 8 * MENU_SCALE + 6;
 const PAD: i32 = 6;
 const TAIL_LEN: i32 = 9;
 
@@ -160,17 +161,25 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draw a command menu (a bordered list of labels) at `(x, y)`.
-    pub fn menu(&mut self, x: i32, y: i32, width: i32, row_h: i32, items: &[(String, Request)]) {
+    /// Fill the whole canvas with a scrollable menu: a list of `labels` offset by
+    /// `scroll` px, with the `hover`ed row highlighted. `MENU_ROW_H` px per row.
+    pub fn menu_list(&mut self, labels: &[String], scroll: i32, hover: Option<usize>) {
         let bg = [0xF2, 0xF2, 0xF2];
         let border = [0x30, 0x30, 0x30];
         let text = [0x10, 0x10, 0x10];
-        let height = items.len() as i32 * row_h + 4;
+        let hi = [0xC8, 0xD8, 0xF0];
 
-        self.fill_rect(x, y, width, height, bg);
-        self.stroke_rect(x, y, width, height, border);
-        for (i, (label, _)) in items.iter().enumerate() {
-            self.text(x + 6, y + 4 + i as i32 * row_h, MENU_SCALE, label, text);
+        self.fill_rect(0, 0, self.w, self.h, bg);
+        for (i, label) in labels.iter().enumerate() {
+            let y = 2 + i as i32 * MENU_ROW_H - scroll;
+            if y + MENU_ROW_H <= 0 || y >= self.h {
+                continue; // off-screen row
+            }
+            if hover == Some(i) {
+                self.fill_rect(0, y, self.w, MENU_ROW_H, hi);
+            }
+            self.text(6, y + 3, MENU_SCALE, label, text);
         }
+        self.stroke_rect(0, 0, self.w, self.h, border);
     }
 }

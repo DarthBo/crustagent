@@ -24,61 +24,31 @@ use present::WgpuPresenter;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
 const SCALE: i32 = 3;
-const MENU_SCALE: i32 = 2;
 const GAP: i32 = 4; // px between balloon and character
 
-#[derive(Clone)]
-struct Menu {
-    x: i32,
-    y: i32,
-    items: Vec<(String, Request)>,
-}
+const MENU_MAX_H: i32 = 640; // tall menus scroll instead of growing past this
 
-impl Menu {
-    fn row_h() -> i32 {
-        8 * MENU_SCALE + 6
+/// All actions: play any of the character's animations (sorted), plus Speak and Hide.
+fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
+    let mut items = vec![
+        ("Hide".to_string(), Request::Hide),
+        (
+            "Speak".to_string(),
+            Request::Speak("Hello from crustagent!".to_string()),
+        ),
+    ];
+    let mut anims = agent.file().gesture_names.clone();
+    anims.sort_by_key(|n| n.to_lowercase());
+    for name in anims {
+        items.push((name.clone(), Request::Play(name)));
     }
-    fn width(&self) -> i32 {
-        let cols = self
-            .items
-            .iter()
-            .map(|(l, _)| l.chars().count())
-            .max()
-            .unwrap_or(4) as i32;
-        cols * 8 * MENU_SCALE + 14
-    }
-    fn height(&self) -> i32 {
-        self.items.len() as i32 * Self::row_h() + 4
-    }
-    fn hit(&self, cx: i32, cy: i32) -> Option<usize> {
-        if cx < self.x || cx >= self.x + self.width() || cy < self.y || cy >= self.y + self.height()
-        {
-            return None;
-        }
-        let i = ((cy - self.y - 2) / Self::row_h()) as usize;
-        (i < self.items.len()).then_some(i)
-    }
-}
-
-fn build_menu(agent: &Agent, x: i32, y: i32) -> Menu {
-    let mut items = Vec::new();
-    for g in ["Greet", "Wave", "Congratulate", "Pleased", "Surprised", "Read"] {
-        if agent.file().animation(g).is_some() {
-            items.push((g.to_string(), Request::Play(g.to_string())));
-        }
-    }
-    items.push((
-        "Speak".to_string(),
-        Request::Speak("Hello from crustagent!".to_string()),
-    ));
-    items.push(("Hide".to_string(), Request::Hide));
-    Menu { x, y, items }
+    items
 }
 
 fn make_window(el: &ActiveEventLoop, w: u32, h: u32, title: &str) -> Arc<Window> {
@@ -105,8 +75,17 @@ struct App {
     balloon_dim: (u32, u32),
     balloon_below: bool,
 
+    // command menu (its own scrollable window)
+    menu_window: Option<Arc<Window>>,
+    menu_presenter: Option<WgpuPresenter>,
+    menu_scratch: Vec<u8>,
+    menu_items: Vec<(String, Request)>,
+    menu_open: bool,
+    menu_scroll: i32,
+    menu_cursor: (i32, i32),
+    menu_dim: (u32, u32),
+
     cursor: (i32, i32),
-    menu: Option<Menu>,
     last: Instant,
 }
 
@@ -148,7 +127,6 @@ impl App {
 
     fn compose_char(&mut self, w: u32, h: u32) {
         let img = self.agent.composite_current();
-        let menu = self.menu.clone();
         self.char_scratch.clear();
         self.char_scratch.resize((w * h * 4) as usize, 0); // transparent
 
@@ -160,9 +138,73 @@ impl App {
             let oy = (h as i32 - ch * SCALE) / 2;
             canvas.blit_scaled(&img.pixels, cw, ch, ox, oy, SCALE);
         }
-        if let Some(m) = &menu {
-            canvas.menu(m.x, m.y, m.width(), Menu::row_h(), &m.items);
+    }
+
+    // -- command menu (its own window) ---------------------------------------
+
+    fn menu_size(&self) -> (u32, u32) {
+        let cols = self
+            .menu_items
+            .iter()
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap_or(6) as i32;
+        let w = (cols * 8 * paint::MENU_SCALE + 12).clamp(80, 480);
+        let content = self.menu_items.len() as i32 * paint::MENU_ROW_H + 4;
+        let h = content.clamp(paint::MENU_ROW_H + 4, MENU_MAX_H);
+        (w as u32, h as u32)
+    }
+
+    fn menu_max_scroll(&self) -> i32 {
+        let content = self.menu_items.len() as i32 * paint::MENU_ROW_H + 4;
+        (content - self.menu_dim.1 as i32).max(0)
+    }
+
+    /// Open the menu at a screen position (top-left), creating its window on first use.
+    fn open_menu(&mut self, el: &ActiveEventLoop, screen: PhysicalPosition<i32>) {
+        let (w, h) = self.menu_size();
+        if self.menu_window.is_none() {
+            let win = make_window(el, w, h, "crustagent menu");
+            win.set_visible(false);
+            self.menu_presenter = Some(WgpuPresenter::new(win.clone()));
+            self.menu_window = Some(win);
+            self.menu_dim = (w, h);
         }
+        if let Some(win) = &self.menu_window {
+            win.set_outer_position(screen);
+            win.set_visible(true);
+            win.focus_window();
+            win.request_redraw();
+        }
+        self.menu_open = true;
+        self.menu_scroll = 0;
+        self.menu_cursor = (-1, -1);
+    }
+
+    fn close_menu(&mut self) {
+        self.menu_open = false;
+        if let Some(win) = &self.menu_window {
+            win.set_visible(false);
+        }
+    }
+
+    fn menu_hover(&self) -> Option<usize> {
+        let (cx, cy) = self.menu_cursor;
+        if cx < 0 || cy < 0 || cx >= self.menu_dim.0 as i32 || cy >= self.menu_dim.1 as i32 {
+            return None;
+        }
+        let i = ((cy + self.menu_scroll - 2) / paint::MENU_ROW_H) as usize;
+        (i < self.menu_items.len()).then_some(i)
+    }
+
+    fn compose_menu(&mut self, w: u32, h: u32) {
+        let labels: Vec<String> = self.menu_items.iter().map(|(l, _)| l.clone()).collect();
+        let scroll = self.menu_scroll;
+        let hover = self.menu_hover();
+        self.menu_scratch.clear();
+        self.menu_scratch.resize((w * h * 4) as usize, 0);
+        let mut canvas = paint::Canvas::new(&mut self.menu_scratch, w, h);
+        canvas.menu_list(&labels, scroll, hover);
     }
 
     fn compose_balloon(&mut self, w: u32, h: u32) {
@@ -210,38 +252,73 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let is_char = self.char_window.as_ref().is_some_and(|w| w.id() == id);
         let is_balloon = self.balloon_window.as_ref().is_some_and(|w| w.id() == id);
+        let is_menu = self.menu_window.as_ref().is_some_and(|w| w.id() == id);
 
         match event {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    if let PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) = event.physical_key {
-                        el.exit();
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Escape) if is_menu => self.close_menu(),
+                    PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) => el.exit(),
+                    _ => {}
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if is_char {
+                    self.cursor = (position.x as i32, position.y as i32);
+                } else if is_menu {
+                    self.menu_cursor = (position.x as i32, position.y as i32);
+                    if let Some(w) = &self.menu_window {
+                        w.request_redraw();
                     }
                 }
             }
-            WindowEvent::CursorMoved { position, .. } if is_char => {
-                self.cursor = (position.x as i32, position.y as i32);
+            WindowEvent::MouseWheel { delta, .. } if is_menu => {
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y * paint::MENU_ROW_H as f32) as i32,
+                    MouseScrollDelta::PixelDelta(p) => p.y as i32,
+                };
+                self.menu_scroll = (self.menu_scroll - dy).clamp(0, self.menu_max_scroll());
+                if let Some(w) = &self.menu_window {
+                    w.request_redraw();
+                }
             }
+            WindowEvent::Focused(false) if is_menu => self.close_menu(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button,
                 ..
-            } if is_char => match button {
-                MouseButton::Right => {
-                    self.menu = Some(build_menu(&self.agent, self.cursor.0, self.cursor.1));
-                }
-                MouseButton::Left => {
-                    if let Some(menu) = self.menu.take() {
-                        if let Some(i) = menu.hit(self.cursor.0, self.cursor.1) {
-                            self.agent.request(menu.items[i].1.clone());
+            } => {
+                if is_char {
+                    match button {
+                        MouseButton::Right => {
+                            let screen = self
+                                .char_window
+                                .as_ref()
+                                .and_then(|w| w.outer_position().ok())
+                                .map(|p| {
+                                    PhysicalPosition::new(p.x + self.cursor.0, p.y + self.cursor.1)
+                                });
+                            if let Some(screen) = screen {
+                                self.open_menu(el, screen);
+                            }
                         }
-                    } else if let Some(window) = &self.char_window {
-                        let _ = window.drag_window();
+                        MouseButton::Left => {
+                            if self.menu_open {
+                                self.close_menu();
+                            } else if let Some(window) = &self.char_window {
+                                let _ = window.drag_window();
+                            }
+                        }
+                        _ => {}
                     }
+                } else if is_menu && button == MouseButton::Left {
+                    if let Some(i) = self.menu_hover() {
+                        self.agent.request(self.menu_items[i].1.clone());
+                    }
+                    self.close_menu();
                 }
-                _ => {}
-            },
+            }
             WindowEvent::RedrawRequested if is_char => {
                 if let Some(window) = self.char_window.clone() {
                     let s = window.inner_size();
@@ -260,6 +337,17 @@ impl ApplicationHandler for App {
                         self.compose_balloon(s.width, s.height);
                         if let Some(p) = self.balloon_presenter.as_mut() {
                             p.present(&self.balloon_scratch, s.width, s.height);
+                        }
+                    }
+                }
+            }
+            WindowEvent::RedrawRequested if is_menu => {
+                if let Some(window) = self.menu_window.clone() {
+                    let s = window.inner_size();
+                    if s.width > 0 && s.height > 0 {
+                        self.compose_menu(s.width, s.height);
+                        if let Some(p) = self.menu_presenter.as_mut() {
+                            p.present(&self.menu_scratch, s.width, s.height);
                         }
                     }
                 }
@@ -312,6 +400,21 @@ fn main() {
         return;
     }
 
+    if let Some(i) = args.iter().position(|a| a == "--menu-png") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "menu.png".into());
+        let labels: Vec<String> = ["Hide", "Speak", "Acknowledge", "Blink", "Congratulate", "Greet"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (w, h) = (220u32, (labels.len() as i32 * paint::MENU_ROW_H + 4) as u32);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        let mut canvas = paint::Canvas::new(&mut buf, w, h);
+        canvas.menu_list(&labels, 0, Some(2)); // hover the 3rd row
+        std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
+        println!("wrote {out}");
+        return;
+    }
+
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let Some(path) = positional.first().map(|s| (*s).clone()) else {
         eprintln!("usage: crustagent-render <file.acs> [Animation] [--say]");
@@ -356,6 +459,7 @@ fn main() {
         return;
     }
 
+    let menu_items = build_menu_items(&agent);
     let mut app = App {
         agent,
         char_window: None,
@@ -366,8 +470,15 @@ fn main() {
         balloon_scratch: Vec::new(),
         balloon_dim: (0, 0),
         balloon_below: false,
+        menu_window: None,
+        menu_presenter: None,
+        menu_scratch: Vec::new(),
+        menu_items,
+        menu_open: false,
+        menu_scroll: 0,
+        menu_cursor: (-1, -1),
+        menu_dim: (0, 0),
         cursor: (0, 0),
-        menu: None,
         last: Instant::now(),
     };
 
