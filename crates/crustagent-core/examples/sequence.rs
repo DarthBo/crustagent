@@ -2,7 +2,7 @@
 //!
 //! Usage: `cargo run -p crustagent-core --example sequence -- <file.acs> <Animation> [seed]`
 
-use crustagent_core::{sequence_animation, SplitMix64};
+use crustagent_core::{sequence_animation, sequence_exit, SplitMix64};
 use crustagent_format::AcsFile;
 
 fn main() {
@@ -55,6 +55,24 @@ fn main() {
             e.frame,
             e.duration_cs as u32 * 10
         );
+    }
+
+    // The return (exit) walk the Agent appends for idle: from the last forward frame's
+    // exit target, following exit frames back to rest.
+    if let Some(last) = seq.frames.last() {
+        let exit_from = anim.frames[last.frame].exit_frame;
+        if exit_from >= 0 && (exit_from as usize) < anim.frames.len() {
+            let ex = sequence_exit(anim, exit_from as usize);
+            println!(
+                "--- return walk from frame {} ({} entries, {} ms) ---",
+                exit_from,
+                ex.len(),
+                ex.total_ms()
+            );
+            for e in &ex.frames {
+                println!("  frame {:>3}  {:>4}ms", e.frame, e.duration_cs as u32 * 10);
+            }
+        }
     }
 
     println!("--- raw source frames ---");
