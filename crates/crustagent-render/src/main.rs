@@ -1,27 +1,23 @@
-//! A windowed viewer that plays a Microsoft Agent character on screen.
+//! A windowed viewer that plays a Microsoft Agent character, driven by the `crustagent`
+//! embedding API.
 //!
 //! Usage: `cargo run -p crustagent-render -- <file.acs> [Animation] [--float] [--dry-run]`
 //!
-//! With no animation named, the character **idles**: it plays escalating `IDLINGLEVEL`
-//! animations back-to-back (via `crustagent_core::IdleDirector`), like the desktop
-//! assistant standing around. Name an animation to loop that gesture (its full
-//! start/continued/return) instead.
+//! The character idles by default; a balloon appears when it speaks. Interaction:
+//! - **left-drag** moves it (system window drag),
+//! - **right-click** opens a small command menu; **left-click** an item to run it,
+//! - **Esc/Q** quits.
 //!
-//! Presentation:
-//! - default: an opaque window drawing the character on a transparency checkerboard
-//!   (`softbuffer`) — reliable everywhere.
-//! - `--float`: a borderless, always-on-top, **transparent** window rendered with `wgpu`
-//!   (premultiplied-alpha surface) — the desktop-buddy look. Drag it anywhere.
-//!
-//! Drag the character with the left mouse button. Esc/Q quits.
+//! `--float` renders through the `wgpu` backend (transparent, borderless, always-on-top);
+//! otherwise a `softbuffer` window draws on a transparency checkerboard.
 
+mod paint;
 mod present;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crustagent_core::{sequence_animation, Character, IdleDirector, SplitMix64};
-use crustagent_format::AcsFile;
+use crustagent::{Agent, Request};
 use present::{Presenter, SoftPresenter, WgpuPresenter};
 
 use winit::application::ApplicationHandler;
@@ -31,182 +27,115 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
-const SCALE: u32 = 3;
-const CHECKER: u32 = 16;
+const SCALE: i32 = 3;
+const STRIP: i32 = 110; // top area reserved for the balloon
+const MENU_SCALE: i32 = 2;
 
-struct CompiledFrame {
-    /// Top-down RGBA8, character-sized.
-    pixels: Vec<u8>,
-    delay_ms: u32,
+#[derive(Clone)]
+struct Menu {
+    x: i32,
+    y: i32,
+    items: Vec<(String, Request)>,
 }
 
-enum Mode {
-    /// Loop escalating idle animations.
-    Idle,
-    /// Loop one named gesture (base + continued + return).
-    Gesture(String),
+impl Menu {
+    fn row_h() -> i32 {
+        8 * MENU_SCALE + 6
+    }
+    fn width(&self) -> i32 {
+        let cols = self
+            .items
+            .iter()
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap_or(4) as i32;
+        cols * 8 * MENU_SCALE + 14
+    }
+    fn height(&self) -> i32 {
+        self.items.len() as i32 * Self::row_h() + 4
+    }
+    fn hit(&self, cx: i32, cy: i32) -> Option<usize> {
+        if cx < self.x || cx >= self.x + self.width() || cy < self.y || cy >= self.y + self.height()
+        {
+            return None;
+        }
+        let i = ((cy - self.y - 2) / Self::row_h()) as usize;
+        (i < self.items.len()).then_some(i)
+    }
+}
+
+fn build_menu(agent: &Agent, x: i32, y: i32) -> Menu {
+    let mut items = Vec::new();
+    for g in ["Greet", "Wave", "Congratulate", "Pleased", "Surprised", "Read"] {
+        if agent.file().animation(g).is_some() {
+            items.push((g.to_string(), Request::Play(g.to_string())));
+        }
+    }
+    items.push((
+        "Speak".to_string(),
+        Request::Speak("Hello from crustagent!".to_string()),
+    ));
+    items.push(("Hide".to_string(), Request::Hide));
+    Menu { x, y, items }
 }
 
 struct App {
-    chr: AcsFile,
-    mode: Mode,
+    agent: Agent,
     float: bool,
-    char_w: u32,
-    char_h: u32,
-    rng: SplitMix64,
-    director: IdleDirector,
-
-    // current clip
-    frames: Vec<CompiledFrame>,
-    clip_total_ms: u32,
-    clip_loop: bool,
-    clip_start: Instant,
-
     scratch: Vec<u8>,
+    cursor: (i32, i32),
+    menu: Option<Menu>,
+    last: Instant,
     window: Option<Arc<Window>>,
     presenter: Option<Box<dyn Presenter>>,
 }
 
 impl App {
-    /// Build the next clip to play. In gesture mode this is the full gesture (looping);
-    /// in idle mode it's the next single idle animation (play-once, then advance).
-    fn build_clip(&mut self) {
-        let (names, do_loop): (Vec<String>, bool) = match &self.mode {
-            Mode::Gesture(name) => {
-                let name = name.clone();
-                let ch = Character::new(&self.chr);
-                let parts = ch
-                    .full_gesture(&name)
-                    .iter()
-                    .map(|a| a.name.clone())
-                    .collect();
-                (parts, true)
-            }
-            Mode::Idle => {
-                let ch = Character::new(&self.chr);
-                match self.director.next_idle(&ch, &mut self.rng) {
-                    Some(n) => (vec![n], false),
-                    None => (Vec::new(), true),
-                }
-            }
-        };
-
-        let ch = Character::new(&self.chr);
-        let mut frames = Vec::new();
-        for name in &names {
-            if let Some(anim) = ch.animation(name) {
-                let seq = sequence_animation(anim, &mut self.rng);
-                for e in &seq.frames {
-                    if let Ok(img) = self.chr.composite_frame(&anim.frames[e.frame], None) {
-                        frames.push(CompiledFrame {
-                            pixels: img.pixels,
-                            delay_ms: (e.duration_cs as u32 * 10).max(1),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Fall back to a single static rest frame if we produced nothing.
-        if frames.is_empty() {
-            if let Ok(img) = self
-                .chr
-                .animation("RestPose")
-                .and_then(|a| a.frames.first())
-                .map(|f| self.chr.composite_frame(f, None))
-                .unwrap_or_else(|| self.chr.composite_frame(&empty_frame(), None))
-            {
-                frames.push(CompiledFrame {
-                    pixels: img.pixels,
-                    delay_ms: 1000,
-                });
-            }
-        }
-
-        self.clip_total_ms = frames.iter().map(|f| f.delay_ms).sum::<u32>().max(1);
-        self.clip_loop = do_loop;
-        self.frames = frames;
-        self.clip_start = Instant::now();
-    }
-
-    fn current_index(&self) -> usize {
-        if self.frames.is_empty() {
-            return 0;
-        }
-        let elapsed = self.clip_start.elapsed().as_millis() as u32;
-        let t = if self.clip_loop {
-            elapsed % self.clip_total_ms
-        } else {
-            elapsed.min(self.clip_total_ms.saturating_sub(1))
-        };
-        let mut acc = 0;
-        for (i, f) in self.frames.iter().enumerate() {
-            acc += f.delay_ms;
-            if t < acc {
-                return i;
-            }
-        }
-        self.frames.len() - 1
-    }
-
-    /// True when a play-once (idle) clip has finished and we should pick the next one.
-    fn clip_finished(&self) -> bool {
-        !self.clip_loop && self.clip_start.elapsed().as_millis() as u32 >= self.clip_total_ms
-    }
-
     fn compose(&mut self, win_w: u32, win_h: u32) {
-        self.scratch.resize((win_w * win_h * 4) as usize, 0);
-        if self.frames.is_empty() {
-            return;
-        }
-        let idx = self.current_index();
-        let frame = &self.frames[idx];
+        // Gather owned data first (no borrow held while writing scratch).
+        let img = self.agent.composite_current();
+        let balloon = self.agent.balloon();
+        let menu = self.menu.clone();
         let float = self.float;
-        let (cw, ch) = (self.char_w, self.char_h);
-        let scale = (win_w / cw).min(win_h / ch).max(1);
-        let (dw, dh) = (cw * scale, ch * scale);
-        let ox = win_w.saturating_sub(dw) / 2;
-        let oy = win_h.saturating_sub(dh) / 2;
 
+        let w = win_w as i32;
+        self.scratch.resize((win_w * win_h * 4) as usize, 0);
+        let buf = &mut self.scratch;
+
+        // background
         for y in 0..win_h {
             for x in 0..win_w {
                 let o = ((y * win_w + x) * 4) as usize;
-                // background
-                let (mut r, mut g, mut b, mut a) = if float {
+                let (r, g, b, a) = if float {
                     (0, 0, 0, 0)
-                } else if ((x / CHECKER) + (y / CHECKER)).is_multiple_of(2) {
+                } else if ((x / 16) + (y / 16)).is_multiple_of(2) {
                     (0xC8, 0xC8, 0xC8, 0xFF)
                 } else {
                     (0x90, 0x90, 0x90, 0xFF)
                 };
-                if x >= ox && x < ox + dw && y >= oy && y < oy + dh {
-                    let cx = (x - ox) / scale;
-                    let cy = (y - oy) / scale;
-                    let p = ((cy * cw + cx) * 4) as usize;
-                    if frame.pixels[p + 3] != 0 {
-                        r = frame.pixels[p];
-                        g = frame.pixels[p + 1];
-                        b = frame.pixels[p + 2];
-                        a = 0xFF;
-                    }
-                }
-                self.scratch[o] = r;
-                self.scratch[o + 1] = g;
-                self.scratch[o + 2] = b;
-                self.scratch[o + 3] = a;
+                buf[o] = r;
+                buf[o + 1] = g;
+                buf[o + 2] = b;
+                buf[o + 3] = a;
             }
         }
-    }
-}
 
-fn empty_frame() -> crustagent_format::Frame {
-    crustagent_format::Frame {
-        duration: 100,
-        sound_ndx: -1,
-        exit_frame: -1,
-        branching: vec![],
-        images: vec![],
-        overlays: vec![],
+        let mut canvas = paint::Canvas::new(buf, win_w, win_h);
+
+        // character (centered horizontally, below the balloon strip)
+        if let Some(img) = &img {
+            let cw = img.width as i32;
+            let ox = (w - cw * SCALE) / 2;
+            canvas.blit_scaled(&img.pixels, cw, img.height as i32, ox, STRIP, SCALE);
+        }
+        // balloon
+        if let Some(b) = &balloon {
+            canvas.balloon(&b.layout.lines);
+        }
+        // menu
+        if let Some(m) = &menu {
+            canvas.menu(m.x, m.y, m.width(), Menu::row_h(), &m.items);
+        }
     }
 }
 
@@ -215,10 +144,18 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let name = self.chr.default_name().map(|n| n.name.clone()).unwrap_or_default();
+        let (cw, ch) = self.agent.size();
+        let win_w = (cw as i32 * SCALE).max(320);
+        let win_h = ch as i32 * SCALE + STRIP;
+        let name = self
+            .agent
+            .file()
+            .default_name()
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
         let mut attrs = Window::default_attributes()
             .with_title(format!("crustagent — {name}"))
-            .with_inner_size(LogicalSize::new(self.char_w * SCALE, self.char_h * SCALE));
+            .with_inner_size(LogicalSize::new(win_w, win_h));
         if self.float {
             attrs = attrs
                 .with_decorations(false)
@@ -226,13 +163,11 @@ impl ApplicationHandler for App {
                 .with_window_level(WindowLevel::AlwaysOnTop);
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-
         let presenter: Box<dyn Presenter> = if self.float {
             Box::new(WgpuPresenter::new(window.clone()))
         } else {
             Box::new(SoftPresenter::new(window.clone()))
         };
-
         window.request_redraw();
         self.window = Some(window);
         self.presenter = Some(presenter);
@@ -248,15 +183,28 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x as i32, position.y as i32);
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button,
                 ..
-            } => {
-                if let Some(window) = &self.window {
-                    let _ = window.drag_window(); // system move; borderless-friendly
+            } => match button {
+                MouseButton::Right => {
+                    self.menu = Some(build_menu(&self.agent, self.cursor.0, self.cursor.1));
                 }
-            }
+                MouseButton::Left => {
+                    if let Some(menu) = self.menu.take() {
+                        if let Some(i) = menu.hit(self.cursor.0, self.cursor.1) {
+                            self.agent.request(menu.items[i].1.clone());
+                        }
+                    } else if let Some(window) = &self.window {
+                        let _ = window.drag_window();
+                    }
+                }
+                _ => {}
+            },
             WindowEvent::RedrawRequested => {
                 let Some(window) = self.window.clone() else {
                     return;
@@ -275,11 +223,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.clip_finished() {
-            self.build_clip(); // advance to the next idle animation
-        }
+        let now = Instant::now();
+        let dt = now.duration_since(self.last).as_millis() as u32;
+        self.last = now;
+        self.agent.update(dt);
+
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(16),
+            now + Duration::from_millis(16),
         ));
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -297,62 +247,47 @@ fn main() {
         eprintln!("usage: crustagent-render <file.acs> [Animation] [--float] [--dry-run]");
         std::process::exit(2);
     };
-    let chr = AcsFile::open(&path).unwrap_or_else(|e| {
+    let mut agent = Agent::load(&path).unwrap_or_else(|e| {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
     });
 
-    let mode = match positional.get(1) {
-        Some(name) => {
-            if Character::new(&chr).full_gesture(name).is_empty() {
-                eprintln!("no animation {name:?}. Available:");
-                for n in &chr.gesture_names {
-                    eprintln!("  {n}");
-                }
-                std::process::exit(1);
+    agent.show();
+    if let Some(name) = positional.get(1) {
+        if agent.file().animation(name).is_none() {
+            eprintln!("no animation {name:?}. Available:");
+            for n in &agent.file().gesture_names {
+                eprintln!("  {n}");
             }
-            Mode::Gesture((*name).clone())
+            std::process::exit(1);
         }
-        None => Mode::Idle,
-    };
+        agent.play((*name).clone());
+    }
 
-    let director = IdleDirector::new(&Character::new(&chr));
-    let (char_w, char_h) = (chr.header.image_size.0 as u32, chr.header.image_size.1 as u32);
-    let name = chr.default_name().map(|n| n.name.clone()).unwrap_or_default();
+    let name = agent.file().default_name().map(|n| n.name.clone()).unwrap_or_default();
+    println!("{name}: right-click for a menu · left-drag to move · Esc/Q to quit");
+
+    if dry_run {
+        // Exercise a scripted session headlessly.
+        agent.speak("Hello from crustagent!");
+        agent.play("Greet");
+        for _ in 0..200 {
+            agent.update(16);
+        }
+        println!("dry run OK ({}x{})", agent.size().0, agent.size().1);
+        return;
+    }
 
     let mut app = App {
-        chr,
-        mode,
+        agent,
         float,
-        char_w,
-        char_h,
-        rng: SplitMix64::new(0),
-        director,
-        frames: Vec::new(),
-        clip_total_ms: 1,
-        clip_loop: true,
-        clip_start: Instant::now(),
         scratch: Vec::new(),
+        cursor: (0, 0),
+        menu: None,
+        last: Instant::now(),
         window: None,
         presenter: None,
     };
-    app.build_clip();
-
-    match &app.mode {
-        Mode::Idle => println!("{name} is idling (level {})", app.director.level()),
-        Mode::Gesture(g) => println!("{name} playing {g}"),
-    }
-    println!(
-        "{} frames ready{}",
-        app.frames.len(),
-        if float { "  [float]" } else { "" }
-    );
-
-    if dry_run {
-        println!("dry run OK ({}x{})", char_w, char_h);
-        return;
-    }
-    println!("drag to move · Esc/Q to quit");
 
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
