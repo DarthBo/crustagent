@@ -11,6 +11,7 @@ workspace = true
 # Intentionally dependency-free for now: the format layer is pure byte-wrangling and
 # should stay trivially portable and fuzzable. Add `thiserror` etc. only if it earns its keep.
 [dependencies]
+cfb = "0.14.0"
 
 [[example]]
 name = "dump"

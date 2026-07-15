@@ -74,9 +74,15 @@ impl IdleDirector {
         let mut lvl = self.level;
         let chosen = loop {
             if let Some(anims) = character.state_animations(&format!("IDLINGLEVEL{lvl}")) {
-                if !anims.is_empty() {
-                    let i = (rng.roll_1_100() as usize - 1) % anims.len();
-                    break Some(anims[i].clone());
+                // Skip dangling references: some characters list idle animations that
+                // aren't actually defined, so only pick names that resolve.
+                let valid: Vec<&String> = anims
+                    .iter()
+                    .filter(|n| character.animation(n).is_some())
+                    .collect();
+                if !valid.is_empty() {
+                    let i = (rng.roll_1_100() as usize - 1) % valid.len();
+                    break Some(valid[i].clone());
                 }
             }
             if lvl <= 1 {

@@ -39,6 +39,11 @@ pub struct AcsFile {
     pub animations: Vec<Animation>,
     image_index: Vec<Block>,
     sound_index: Vec<Block>,
+    /// Pre-decoded image/sound pools (ACS 1.5, whose data comes from OLE2 streams rather
+    /// than a single mmap'd blob). When `Some`, they take precedence over the lazy
+    /// index-into-`data` path used by ACS 2.0.
+    images: Option<Vec<Image>>,
+    sounds: Option<Vec<Vec<u8>>>,
 }
 
 /// Return the leading signature DWORD, or `None` if the buffer is too short.
@@ -61,6 +66,9 @@ impl AcsFile {
             needed: 4,
             available: data.len(),
         })?;
+        if sig == crate::acs_v15::OLE2_SIGNATURE {
+            return crate::acs_v15::parse_v15(data);
+        }
         if sig != ACS_SIGNATURE {
             return Err(Error::BadSignature { found: sig });
         }
@@ -97,7 +105,39 @@ impl AcsFile {
             animations,
             image_index,
             sound_index,
+            images: None,
+            sounds: None,
         })
+    }
+
+    /// Assemble an [`AcsFile`] from already-decoded parts (used by the ACS 1.5 reader,
+    /// which pulls images/sounds out of OLE2 streams rather than a flat blob).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_v15(
+        header: FileHeader,
+        tts: Option<Tts>,
+        balloon: Option<Balloon>,
+        names: Vec<Name>,
+        states: Vec<State>,
+        gesture_names: Vec<String>,
+        animations: Vec<Animation>,
+        images: Vec<Image>,
+        sounds: Vec<Vec<u8>>,
+    ) -> AcsFile {
+        AcsFile {
+            data: Vec::new(),
+            header,
+            tts,
+            balloon,
+            names,
+            states,
+            gesture_names,
+            animations,
+            image_index: Vec::new(),
+            sound_index: Vec::new(),
+            images: Some(images),
+            sounds: Some(sounds),
+        }
     }
 
     /// Find the character name for a Windows `LANGID`, mirroring the original's name lookup:
@@ -123,11 +163,17 @@ impl AcsFile {
 
     /// Number of images in the image table.
     pub fn image_count(&self) -> usize {
-        self.image_index.len()
+        match &self.images {
+            Some(imgs) => imgs.len(),
+            None => self.image_index.len(),
+        }
     }
 
     /// Decode image `index` to its 8-bpp palette-index bits.
     pub fn image(&self, index: usize) -> Result<Image> {
+        if let Some(imgs) = &self.images {
+            return imgs.get(index).cloned().ok_or(Error::BadImage { index });
+        }
         let blk = self
             .image_index
             .get(index)
@@ -138,11 +184,17 @@ impl AcsFile {
 
     /// Number of sounds in the sound table.
     pub fn sound_count(&self) -> usize {
-        self.sound_index.len()
+        match &self.sounds {
+            Some(snds) => snds.len(),
+            None => self.sound_index.len(),
+        }
     }
 
     /// Borrow the raw bytes of sound `index` (a complete standalone WAV file).
     pub fn sound(&self, index: usize) -> Option<&[u8]> {
+        if let Some(snds) = &self.sounds {
+            return snds.get(index).map(|v| v.as_slice());
+        }
         let blk = self.sound_index.get(index)?;
         self.data.get(blk.range())
     }
@@ -227,7 +279,11 @@ impl AcsFile {
                 if cx < 0 || cx >= cw {
                     continue;
                 }
-                let idx = img.bits[src_row + src_x as usize];
+                // Tolerate empty/truncated image data (some characters ship a 0-byte
+                // placeholder image): treat missing source pixels as transparent.
+                let Some(&idx) = img.bits.get(src_row + src_x as usize) else {
+                    continue;
+                };
                 if idx == transparency {
                     continue;
                 }

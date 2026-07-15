@@ -59,16 +59,22 @@ fn full_gesture_chains_continued_and_return() {
             }
         }
 
-        // Merlin specifically has the three GetAttention parts.
+        // GetAttention is a good multi-part example. Its return can be either the
+        // conventional `GetAttentionReturn` or a *named* return (e.g. `RestPose`), so
+        // check against whatever `return_animation` actually resolves to.
         if ch.animation("GetAttention").is_some() {
             let parts: Vec<&str> =
                 ch.full_gesture("GetAttention").iter().map(|a| a.name.as_str()).collect();
-            eprintln!("{}: GetAttention -> {parts:?}", path.display());
             if ch.continued_animation("GetAttention").is_some() {
                 assert!(parts.iter().any(|p| p.eq_ignore_ascii_case("GetAttentionContinued")));
             }
-            if ch.return_animation("GetAttention").is_some() {
-                assert!(parts.iter().any(|p| p.eq_ignore_ascii_case("GetAttentionReturn")));
+            if let Some(ret) = ch.return_animation("GetAttention") {
+                assert!(
+                    parts.iter().any(|p| p.eq_ignore_ascii_case(&ret.name)),
+                    "{}: GetAttention return {:?} not chained: {parts:?}",
+                    path.display(),
+                    ret.name
+                );
             }
         }
         checked += 1;
