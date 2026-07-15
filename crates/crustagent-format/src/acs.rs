@@ -255,10 +255,14 @@ impl AcsFile {
             .to_rgba(&self.header.palette))
     }
 
-    /// Blit one 8-bpp image onto the (bottom-up-addressed) canvas at `offset`, skipping
-    /// transparent-index pixels. The image and the character canvas are both bottom-up
-    /// DIBs; `offset` is in that bottom-up space. We write into the top-down `Indexed`
-    /// buffer by flipping the row on store.
+    /// Blit one 8-bpp image onto the top-down `Indexed` canvas at `offset`, skipping
+    /// transparent-index pixels.
+    ///
+    /// `offset` is the image's top-left position in **top-down** canvas space (matching
+    /// the original compositor, where a source pixel at visual row `v` lands at canvas
+    /// row `v + offset.y`). The image bits are a bottom-up DIB, so visual row `v` is stored
+    /// at scanline `height-1-v`. (Full-frame images use `offset ≈ (0,0)`, but smaller
+    /// sub-images — e.g. a separate head layer — depend on this being top-down.)
     fn blit(&self, canvas: &mut Indexed, img: &Image, offset: (i16, i16)) {
         let transparency = self.header.transparency;
         let stride = img.stride();
@@ -266,27 +270,26 @@ impl AcsFile {
         let ch = canvas.height as i32;
         let (off_x, off_y) = (offset.0 as i32, offset.1 as i32);
 
-        for src_y in 0..img.height as i32 {
-            let cy_bottom_up = src_y + off_y;
-            if cy_bottom_up < 0 || cy_bottom_up >= ch {
+        for v in 0..img.height as i32 {
+            let cy = v + off_y; // top-down canvas row
+            if cy < 0 || cy >= ch {
                 continue;
             }
-            let dst_row_top_down = (ch - 1 - cy_bottom_up) as usize;
-            let src_row = (src_y as usize) * stride;
-            for src_x in 0..img.width as i32 {
-                let cx = src_x + off_x;
+            let src_row = (img.height as i32 - 1 - v) as usize * stride; // bottom-up scanline
+            for u in 0..img.width as i32 {
+                let cx = u + off_x;
                 if cx < 0 || cx >= cw {
                     continue;
                 }
                 // Tolerate empty/truncated image data (some characters ship a 0-byte
                 // placeholder image): treat missing source pixels as transparent.
-                let Some(&idx) = img.bits.get(src_row + src_x as usize) else {
+                let Some(&idx) = img.bits.get(src_row + u as usize) else {
                     continue;
                 };
                 if idx == transparency {
                     continue;
                 }
-                canvas.indices[dst_row_top_down * canvas.width as usize + cx as usize] = idx;
+                canvas.indices[cy as usize * canvas.width as usize + cx as usize] = idx;
             }
         }
     }
