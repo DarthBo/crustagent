@@ -24,7 +24,7 @@ these lovingly-made characters usable again wherever Rust runs.
 ```
 crates/
   crustagent/          # embedding API: Agent + serial action queue (start here to embed)
-  crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACF header)
+  crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACS 1.5, ACF header)
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
   crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SystemTts
   crustagent-audio/    # sound-effect playback (rodio) — the character's embedded WAVs
@@ -76,7 +76,7 @@ balloon reveal, visemes → mouth) that the `Agent` consumes each tick. (Linux n
 `speech-dispatcher` installed for audio; it degrades to silent otherwise.)
 
 Planned: a viseme-accurate/offline TTS backend (e.g. Piper) for true lip-sync, `.aca`
-bodies for ACF + the ACS 1.5 (OLE2) format, and a host-defined command API for the menu.
+bodies for ACF, and a host-defined command API for the menu.
 
 ## `crustagent-format` — status
 
@@ -85,9 +85,12 @@ Implemented:
   metadata, names (with language preference), states, gestures→animations→frames
   (images, overlays, branching), the LZ77 image bitstream **decompressor**, raw WAV
   sound extraction, and a **frame compositor** to RGBA/indexed.
+- **ACS 1.5** — the older **OLE2 compound-document** format (a `char.acf` header stream +
+  one compressed stream per animation), normalized into the same `AcsFile`.
 
-Not yet (nice-to-have): ACS 1.5 (OLE2 compound document), ACF (+ external `.aca`), ACD
-(text script).
+Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), and a small set of
+files with an obfuscated/variant 2.0 char-info block. Run the `sweep` example to audit a
+character library against the parser.
 
 ## `crustagent-core` — status
 
