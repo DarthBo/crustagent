@@ -22,16 +22,31 @@ fn window(src: &[u8], i: usize) -> u32 {
     v
 }
 
-/// Decode a compressed image bitstream into exactly `expected` output bytes.
+/// Decode a compressed bitstream into exactly `expected` output bytes.
 ///
-/// Framing requirements (else the stream is rejected): `src.len() > 7`, `src[0] == 0`,
-/// and at least 6 trailing `0xFF` bytes.
+/// Strict wrapper over [`decode_run`]: errors unless the decode produced exactly `expected`
+/// bytes (used for header/animation streams, where a short decode means corruption).
 pub fn decode_data(src: &[u8], expected: usize) -> Result<Vec<u8>> {
-    if src.len() <= 7 || src[0] != 0 {
+    let out = decode_run(src, expected);
+    if out.len() != expected {
         return Err(Error::DecodeFailed {
-            got: 0,
+            got: out.len(),
             expected,
         });
+    }
+    Ok(out)
+}
+
+/// Decode a compressed bitstream, returning as many bytes as it yields (0..=`expected`).
+///
+/// Unlike [`decode_data`] this never errors: a bad frame yields an empty vec, and a stream
+/// that ends early yields a short vec — mirroring the original `DecodeData`, which breaks
+/// when a copy would overrun the target and leaves the caller to treat the result as a
+/// partial/blank image. Framing (else empty): `src.len() > 7`, `src[0] == 0`, ≥6 trailing
+/// `0xFF`.
+pub fn decode_run(src: &[u8], expected: usize) -> Vec<u8> {
+    if src.len() <= 7 || src[0] != 0 {
+        return Vec::new();
     }
 
     // Require >= 6 trailing 0xFF bytes (the terminator/padding marker). This mirrors
@@ -48,7 +63,7 @@ pub fn decode_data(src: &[u8], expected: usize) -> Result<Vec<u8>> {
             bc += 1;
         }
         if bc < 6 {
-            return Err(Error::DecodeFailed { got: 0, expected });
+            return Vec::new();
         }
     }
 
@@ -138,13 +153,7 @@ pub fn decode_data(src: &[u8], expected: usize) -> Result<Vec<u8>> {
         bit &= 7;
     }
 
-    if out.len() != expected {
-        return Err(Error::DecodeFailed {
-            got: out.len(),
-            expected,
-        });
-    }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -168,5 +177,17 @@ mod tests {
         // Valid leading byte but no 0xFF terminator run.
         let src = vec![0u8; 16];
         assert!(decode_data(&src, 10).is_err());
+    }
+
+    #[test]
+    fn decode_run_is_lenient_where_decode_data_is_strict() {
+        // A bad frame yields empty (not a panic/error) from the lenient path, while the
+        // strict wrapper still errors — read_image relies on this to pad short/blank images.
+        let mut bad = vec![0xFFu8; 16];
+        bad[0] = 1;
+        assert!(decode_run(&bad, 10).is_empty());
+        assert!(decode_data(&bad, 10).is_err());
+        // Never yields more than `expected`.
+        assert!(decode_run(&[0u8; 3], 100).len() <= 100);
     }
 }

@@ -2,7 +2,6 @@
 //!
 //! Reverse-engineered from the original compiled binary format.
 
-use crate::decode::decode_data;
 use crate::error::{Error, Result};
 use crate::model::*;
 use crate::reader::Cursor;
@@ -179,7 +178,7 @@ impl AcsFile {
             .get(index)
             .copied()
             .ok_or(Error::BadImage { index })?;
-        read_image(&self.data, blk.offset, index)
+        read_image(&self.data, blk.offset, index, self.header.transparency)
     }
 
     /// Number of sounds in the sound table.
@@ -313,6 +312,16 @@ fn parse_header_block(data: &[u8], blk: Block) -> Result<HeaderBlock> {
 
     let version_minor = c.u16()?;
     let version_major = c.u16()?;
+    // The character-info block should open with a small version (Agent 2.x). A wild value
+    // means the block isn't the plain layout we expect — in practice a handful of
+    // third-party files ship this region encrypted/obfuscated. Fail clearly rather than
+    // cascading into a bogus multi-gigabyte string length.
+    if version_major == 0 || version_major > 99 {
+        return Err(Error::InvalidData(format!(
+            "character-info block is unreadable (version reads as {version_major}.{version_minor}); \
+             it appears encrypted or is an unsupported variant"
+        )));
+    }
     let names_offset_abs = c.u32()? as usize;
     let _names_size = c.u32()?;
     let guid = c.guid()?;
@@ -500,7 +509,16 @@ fn parse_frame(c: &mut Cursor) -> Result<Frame> {
     })
 }
 
-fn read_image(data: &[u8], offset: usize, index: usize) -> Result<Image> {
+fn read_image(data: &[u8], offset: usize, index: usize, transparency: u8) -> Result<Image> {
+    // A blank, zero-size image — the graceful result for empty/placeholder or malformed
+    // slots (some characters ship 1-byte image entries). Composites to nothing.
+    let blank = || Image {
+        index,
+        width: 0,
+        height: 0,
+        bits: Vec::new(),
+    };
+
     let mut c = Cursor::at(data, offset);
     let first_byte = c.u8()?;
     let width = c.u16()?;
@@ -508,17 +526,24 @@ fn read_image(data: &[u8], offset: usize, index: usize) -> Result<Image> {
     let compressed = c.u8()?;
     let byte_count = c.u32()? as usize;
 
+    // Placeholder/empty slot (leading flag byte 0, or degenerate dimensions).
     if first_byte == 0 || width == 0 || height == 0 {
-        return Err(Error::BadImage { index });
+        return Ok(blank());
     }
+    // Truncated/garbage record whose payload runs past the file.
+    let Ok(payload) = c.bytes(byte_count) else {
+        return Ok(blank());
+    };
 
-    let payload = c.bytes(byte_count)?;
-    let bits = if compressed != 0 {
-        let expected = Image::expected_len(width, height);
-        decode_data(payload, expected)?
+    let expected = Image::expected_len(width, height);
+    let mut bits = if compressed != 0 {
+        crate::decode::decode_run(payload, expected)
     } else {
         payload.to_vec()
     };
+    // A stream that ends early (or an under-long uncompressed record) is padded with the
+    // transparent index; the original engine likewise tolerates a short decode.
+    bits.resize(expected, transparency);
 
     Ok(Image {
         index,
