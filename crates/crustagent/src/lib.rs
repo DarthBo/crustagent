@@ -247,10 +247,22 @@ pub struct Agent {
     track: Vec<TrackFrame>,
     track_total_ms: u32,
     track_loops: bool,
+    /// When looping, wrap back to this ms offset (the animation's loop start) rather than
+    /// to 0 — so a one-shot intro (e.g. a walk's takeoff) plays once and only the hold
+    /// repeats.
+    track_loop_start_ms: u32,
     track_elapsed_ms: u32,
 
     // move / speak state
     movement: MoveTo,
+    /// The moving animation currently playing, so its exit (the landing) can play on
+    /// arrival. `None` unless a move is in flight.
+    move_anim: Option<usize>,
+    /// Whether the position tween is running yet. A **walk** (looping animation) glides
+    /// from the start, animating the whole way. A **flight** (finite animation, e.g. Merlin
+    /// putting on his glasses) plays that animation in place first — he can't prepare while
+    /// flying — and only then zips to the destination.
+    move_gliding: bool,
     tts: Box<dyn TtsEngine>,
     think_timer: TimedTts,
     speak_words: Vec<String>,
@@ -296,8 +308,11 @@ impl Agent {
             track: Vec::new(),
             track_total_ms: 1,
             track_loops: false,
+            track_loop_start_ms: 0,
             track_elapsed_ms: 0,
             movement: MoveTo::new((0, 0), (0, 0), 0),
+            move_anim: None,
+            move_gliding: false,
             tts: Box::new(TimedTts::new()),
             think_timer: TimedTts::new().with_pace(THINK_PACE_MS),
             speak_words: Vec::new(),
@@ -520,15 +535,23 @@ impl Agent {
         match self.activity {
             Activity::Hidden => {}
             Activity::Move => {
-                let before = self.position;
-                self.movement.advance(dt_ms);
-                self.position = self.movement.position();
-                if self.position != before {
-                    let (x, y) = self.position;
-                    self.emit(Event::Moved { x, y });
+                // A flight plays its in-place preparation (the finite animation) first, then
+                // zips; a walk glides from the start. Once gliding, the exit (landing) plays
+                // on arrival.
+                if !self.move_gliding && self.track_elapsed_ms >= self.track_total_ms {
+                    self.move_gliding = true;
                 }
-                if self.movement.is_done() {
-                    self.next();
+                if self.move_gliding {
+                    let before = self.position;
+                    self.movement.advance(dt_ms);
+                    self.position = self.movement.position();
+                    if self.position != before {
+                        let (x, y) = self.position;
+                        self.emit(Event::Moved { x, y });
+                    }
+                    if self.movement.is_done() {
+                        self.begin_landing();
+                    }
                 }
             }
             Activity::Speak => self.advance_speech(dt_ms, false),
@@ -698,7 +721,7 @@ impl Agent {
             Request::MoveTo { x, y, speed } => {
                 self.movement = MoveTo::new(self.position, (x, y), speed);
                 let dir = self.movement.direction();
-                self.start_state(dir.move_state(), true, Activity::Move);
+                self.start_move(dir.move_state());
             }
             Request::Speak(text) => {
                 let parsed = parse_speech(&text);
@@ -770,6 +793,94 @@ impl Agent {
             }
         }
         self.activity = activity;
+    }
+
+    /// Start a `MOVING*` state for travel. Two shapes, distinguished by whether the move
+    /// animation loops:
+    ///
+    /// - a **walk** (looping animation, e.g. the gnome's 2-frame cycle): glide from the
+    ///   start, cycling the walk the whole way at the requested speed.
+    /// - a **flight** (finite animation, e.g. Merlin putting on his glasses): play that
+    ///   preparation *in place* first (he can't prepare mid-air), then **zip** to the
+    ///   destination fast (capped duration), holding the final frame.
+    ///
+    /// The landing (the exit walk) plays on arrival in [`begin_landing`].
+    fn start_move(&mut self, state: &str) {
+        /// A flight's zip caps at this long, so a far trip just crosses faster rather than
+        /// dragging out (the preparation animation, played in place, is separate).
+        const ZIP_MAX_MS: u32 = 500;
+
+        let idx = {
+            let ch = Character::new(&self.file);
+            ch.state_animations(state)
+                .into_iter()
+                .flatten()
+                .find_map(|n| self.anim_index(n))
+        };
+        match idx {
+            Some(i) => {
+                let (track, loop_start_ms) = {
+                    let anim = &self.file.animations[i];
+                    let seq = sequence_animation(anim, &mut self.rng);
+                    let track: Vec<TrackFrame> = seq
+                        .frames
+                        .iter()
+                        .map(|e| TrackFrame { anim: i, frame: e.frame, dur_ms: (e.duration_cs as u32 * 10).max(1) })
+                        .collect();
+                    (track, seq.loop_start_cs.map(|cs| cs * 10))
+                };
+                let walk = loop_start_ms.is_some();
+                self.install_track(track, walk);
+                self.track_loop_start_ms = loop_start_ms.unwrap_or(0);
+                self.move_anim = Some(i);
+                if walk {
+                    self.move_gliding = true; // walk animates the whole way
+                } else {
+                    // Flight: prepare in place, then zip fast on arrival of the tween.
+                    self.move_gliding = false;
+                    let zip = self.movement.duration_ms().min(ZIP_MAX_MS);
+                    self.movement.retime(zip);
+                }
+            }
+            None => {
+                self.build_rest_track();
+                self.track_loops = true;
+                self.move_gliding = true;
+            }
+        }
+        self.activity = Activity::Move;
+    }
+
+    /// On arrival, play the moving animation's exit (the landing) once, then continue the
+    /// queue. Falls back to advancing immediately if there's no exit branch.
+    fn begin_landing(&mut self) {
+        let Some(i) = self.move_anim.take() else {
+            self.next();
+            return;
+        };
+        let Some(cur) = self.track_frame().map(|f| f.frame) else {
+            self.next();
+            return;
+        };
+        let track: Vec<TrackFrame> = {
+            let anim = &self.file.animations[i];
+            let exit_from = anim.frames.get(cur).map(|f| f.exit_frame).unwrap_or(-1);
+            if exit_from < 0 || exit_from as usize >= anim.frames.len() {
+                Vec::new()
+            } else {
+                sequence_exit(anim, exit_from as usize)
+                    .frames
+                    .iter()
+                    .map(|e| TrackFrame { anim: i, frame: e.frame, dur_ms: (e.duration_cs as u32 * 10).max(1) })
+                    .collect()
+            }
+        };
+        if track.is_empty() {
+            self.next();
+            return;
+        }
+        self.install_track(track, false);
+        self.activity = Activity::Gesture; // a non-looping gesture: finishes → next()
     }
 
     fn anim_index(&self, name: &str) -> Option<usize> {
@@ -856,6 +967,9 @@ impl Agent {
         self.track_total_ms = track.iter().map(|f| f.dur_ms).sum::<u32>().max(1);
         self.track = track;
         self.track_loops = loops;
+        self.track_loop_start_ms = 0; // a move overrides this after installing
+        self.move_anim = None;
+        self.move_gliding = false;
         self.track_elapsed_ms = 0;
         self.last_track_index = None;
     }
@@ -888,7 +1002,14 @@ impl Agent {
             return None;
         }
         let t = if self.track_loops {
-            self.track_elapsed_ms % self.track_total_ms
+            if self.track_elapsed_ms < self.track_total_ms {
+                self.track_elapsed_ms // first pass: play the intro (takeoff) once
+            } else {
+                // then repeat only [loop_start, total) — the hold/fly, not the intro.
+                let ls = self.track_loop_start_ms.min(self.track_total_ms.saturating_sub(1));
+                let loop_len = (self.track_total_ms - ls).max(1);
+                ls + (self.track_elapsed_ms - ls) % loop_len
+            }
         } else {
             self.track_elapsed_ms.min(self.track_total_ms.saturating_sub(1))
         };

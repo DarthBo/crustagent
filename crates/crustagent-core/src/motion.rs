@@ -96,6 +96,19 @@ impl MoveTo {
         Direction::toward(self.dest.0 - self.start.0, self.dest.1 - self.start.1)
     }
 
+    /// The travel duration (ms).
+    pub fn duration_ms(&self) -> u32 {
+        self.duration_ms
+    }
+
+    /// Override the travel duration (ms), keeping start/dest/elapsed. Used to fit a finite
+    /// move animation exactly across the trip so it doesn't freeze on its last frame when
+    /// the distance would otherwise outlast it.
+    pub fn retime(&mut self, duration_ms: u32) {
+        self.duration_ms = duration_ms;
+        self.elapsed_ms = self.elapsed_ms.min(duration_ms);
+    }
+
     /// Advance the move clock.
     pub fn advance(&mut self, dt_ms: u32) {
         self.elapsed_ms = self.elapsed_ms.saturating_add(dt_ms).min(self.duration_ms);
