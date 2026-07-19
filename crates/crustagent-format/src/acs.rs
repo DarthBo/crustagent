@@ -43,6 +43,11 @@ pub struct AcsFile {
     /// index-into-`data` path used by ACS 2.0.
     images: Option<Vec<Image>>,
     sounds: Option<Vec<Vec<u8>>>,
+    /// A pre-decoded **RGBA** image pool for characters built in memory from already-RGBA
+    /// art (see [`AcsFile::from_parts_rgba`]) rather than an 8-bpp palette. When `Some`,
+    /// [`composite_frame`](AcsFile::composite_frame) alpha-blits these directly, bypassing
+    /// the palette/indexed path entirely.
+    rgba_images: Option<Vec<Rgba>>,
 }
 
 /// Return the leading signature DWORD, or `None` if the buffer is too short.
@@ -106,6 +111,7 @@ impl AcsFile {
             sound_index,
             images: None,
             sounds: None,
+            rgba_images: None,
         })
     }
 
@@ -136,6 +142,74 @@ impl AcsFile {
             sound_index: Vec::new(),
             images: Some(images),
             sounds: Some(sounds),
+            rgba_images: None,
+        }
+    }
+
+    /// Assemble an [`AcsFile`] from already-decoded parts with an **8-bpp palette-indexed**
+    /// image pool — the public, in-memory equivalent of a parsed file. Use this to build a
+    /// character programmatically (e.g. a synthetic or app-supplied character) that flows
+    /// through the same [`Agent`](../crustagent/struct.Agent.html)/compositor path as a real
+    /// `.acs`. For already-RGBA art, prefer [`from_parts_rgba`](AcsFile::from_parts_rgba).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        header: FileHeader,
+        tts: Option<Tts>,
+        balloon: Option<Balloon>,
+        names: Vec<Name>,
+        states: Vec<State>,
+        gesture_names: Vec<String>,
+        animations: Vec<Animation>,
+        images: Vec<Image>,
+        sounds: Vec<Vec<u8>>,
+    ) -> AcsFile {
+        AcsFile::from_v15(
+            header,
+            tts,
+            balloon,
+            names,
+            states,
+            gesture_names,
+            animations,
+            images,
+            sounds,
+        )
+    }
+
+    /// Assemble an [`AcsFile`] from already-decoded parts with an **RGBA** image pool. Each
+    /// [`FrameImage::image_ndx`] then indexes `images` (this RGBA pool), and
+    /// [`composite_frame`](AcsFile::composite_frame) alpha-blits them directly — so
+    /// anti-aliased, soft-alpha art stays crisp (no palette quantization, no 1-bit
+    /// transparency key). The palette-indexed helpers ([`image`](AcsFile::image),
+    /// [`composite_frame_indexed`](AcsFile::composite_frame_indexed)) are not available on a
+    /// file built this way. `header.image_size` sets the canvas size; `header.palette`/
+    /// `transparency` are unused.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_rgba(
+        header: FileHeader,
+        tts: Option<Tts>,
+        balloon: Option<Balloon>,
+        names: Vec<Name>,
+        states: Vec<State>,
+        gesture_names: Vec<String>,
+        animations: Vec<Animation>,
+        images: Vec<Rgba>,
+        sounds: Vec<Vec<u8>>,
+    ) -> AcsFile {
+        AcsFile {
+            data: Vec::new(),
+            header,
+            tts,
+            balloon,
+            names,
+            states,
+            gesture_names,
+            animations,
+            image_index: Vec::new(),
+            sound_index: Vec::new(),
+            images: None,
+            sounds: Some(sounds),
+            rgba_images: Some(images),
         }
     }
 
@@ -162,6 +236,9 @@ impl AcsFile {
 
     /// Number of images in the image table.
     pub fn image_count(&self) -> usize {
+        if let Some(rgba) = &self.rgba_images {
+            return rgba.len();
+        }
         match &self.images {
             Some(imgs) => imgs.len(),
             None => self.image_index.len(),
@@ -249,10 +326,54 @@ impl AcsFile {
     }
 
     /// Composite one frame to top-down RGBA (transparency index → transparent pixel).
+    ///
+    /// For a file built via [`from_parts_rgba`](AcsFile::from_parts_rgba) this alpha-blits
+    /// the RGBA pool directly (source-over); otherwise it composites through the 8-bpp
+    /// palette path and maps the result through the palette.
     pub fn composite_frame(&self, frame: &Frame, mouth: Option<MouthOverlay>) -> Result<Rgba> {
+        if let Some(pool) = &self.rgba_images {
+            return self.composite_frame_rgba(frame, mouth, pool);
+        }
         Ok(self
             .composite_frame_indexed(frame, mouth)?
             .to_rgba(&self.header.palette))
+    }
+
+    /// RGBA compositing (mirrors [`composite_frame_indexed`]'s layering, but source-over on
+    /// true RGBA instead of index-keying): base images back-to-front (highest index is the
+    /// bottom layer), then the matching mouth overlay on top; a `replace` overlay suppresses
+    /// base image 0. `image_ndx` indexes the RGBA `pool`.
+    fn composite_frame_rgba(
+        &self,
+        frame: &Frame,
+        mouth: Option<MouthOverlay>,
+        pool: &[Rgba],
+    ) -> Result<Rgba> {
+        let (w, h) = self.header.image_size;
+        let mut canvas = Rgba::transparent(w as u32, h as u32);
+
+        let overlay = mouth.and_then(|m| frame.overlays.iter().find(|o| o.overlay_type == m));
+        let replace_base = overlay.is_some_and(|o| o.replace);
+
+        for i in (0..frame.images.len()).rev() {
+            if i == 0 && replace_base {
+                continue;
+            }
+            let fi = frame.images[i];
+            let src = pool
+                .get(fi.image_ndx as usize)
+                .ok_or(Error::BadImage { index: fi.image_ndx as usize })?;
+            alpha_over(&mut canvas, src, fi.offset);
+        }
+
+        if let Some(o) = overlay {
+            let src = pool
+                .get(o.image_ndx as usize)
+                .ok_or(Error::BadImage { index: o.image_ndx as usize })?;
+            alpha_over(&mut canvas, src, o.offset);
+        }
+
+        Ok(canvas)
     }
 
     /// Blit one 8-bpp image onto the top-down `Indexed` canvas at `offset`, skipping
@@ -291,6 +412,49 @@ impl AcsFile {
                 }
                 canvas.indices[cy as usize * canvas.width as usize + cx as usize] = idx;
             }
+        }
+    }
+}
+
+/// Source-over composite a top-down RGBA `src` onto a top-down RGBA `canvas` at `offset`
+/// (non-premultiplied straight alpha). Pixels outside the canvas are clipped.
+fn alpha_over(canvas: &mut Rgba, src: &Rgba, offset: (i16, i16)) {
+    let cw = canvas.width as i32;
+    let ch = canvas.height as i32;
+    let (off_x, off_y) = (offset.0 as i32, offset.1 as i32);
+
+    for v in 0..src.height as i32 {
+        let cy = v + off_y;
+        if cy < 0 || cy >= ch {
+            continue;
+        }
+        for u in 0..src.width as i32 {
+            let cx = u + off_x;
+            if cx < 0 || cx >= cw {
+                continue;
+            }
+            let s = ((v * src.width as i32 + u) as usize) * 4;
+            let sa = src.pixels[s + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            let d = ((cy * cw + cx) as usize) * 4;
+            if sa == 255 {
+                canvas.pixels[d..d + 4].copy_from_slice(&src.pixels[s..s + 4]);
+                continue;
+            }
+            // out = src + dst * (1 - src_a), straight alpha.
+            let da = canvas.pixels[d + 3] as u32;
+            let inv = 255 - sa;
+            let out_a = sa + da * inv / 255;
+            for k in 0..3 {
+                let sc = src.pixels[s + k] as u32;
+                let dc = canvas.pixels[d + k] as u32;
+                // Composite in straight-alpha space; guard the zero-alpha case.
+                let num = sc * sa + dc * da * inv / 255;
+                canvas.pixels[d + k] = if out_a == 0 { 0 } else { (num / out_a) as u8 };
+            }
+            canvas.pixels[d + 3] = out_a as u8;
         }
     }
 }
