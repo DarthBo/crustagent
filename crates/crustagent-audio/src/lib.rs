@@ -11,18 +11,19 @@ use crustagent::AudioSink;
 
 /// Plays WAV clips through the default output device.
 pub struct RodioSink {
-    _stream: rodio::OutputStream,
-    handle: rodio::OutputStreamHandle,
+    // Owns the open output device; each clip plays on its own detached player
+    // connected to this device's mixer.
+    device: rodio::MixerDeviceSink,
 }
 
 impl RodioSink {
     /// Open the default audio output, or `None` if none is available.
     pub fn new() -> Option<RodioSink> {
-        let (stream, handle) = rodio::OutputStream::try_default().ok()?;
-        Some(RodioSink {
-            _stream: stream,
-            handle,
-        })
+        let mut device = rodio::DeviceSinkBuilder::open_default_sink().ok()?;
+        // We drop this sink deliberately when the character goes away; rodio's
+        // "Dropping DeviceSink…" notice on drop is just noise here.
+        device.log_on_drop(false);
+        Some(RodioSink { device })
     }
 }
 
@@ -34,11 +35,17 @@ impl AudioSink for RodioSink {
         if pcm.samples.is_empty() {
             return;
         }
-        let Ok(sink) = rodio::Sink::try_new(&self.handle) else {
+        // rodio 0.22 works in f32 samples and rejects a zero channel count / rate.
+        let (Some(channels), Some(sample_rate)) = (
+            rodio::ChannelCount::new(pcm.channels),
+            rodio::SampleRate::new(pcm.sample_rate),
+        ) else {
             return;
         };
-        let source = rodio::buffer::SamplesBuffer::new(pcm.channels, pcm.sample_rate, pcm.samples);
-        sink.append(source);
-        sink.detach(); // keep playing after the handle drops
+        let samples: Vec<f32> = pcm.samples.iter().map(|&s| s as f32 / 32768.0).collect();
+        let source = rodio::buffer::SamplesBuffer::new(channels, sample_rate, samples);
+        let player = rodio::Player::connect_new(self.device.mixer());
+        player.append(source);
+        player.detach(); // keep playing after the player handle drops
     }
 }

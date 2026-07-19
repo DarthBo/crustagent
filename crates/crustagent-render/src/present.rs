@@ -91,17 +91,17 @@ impl WgpuPresenter {
             power_preference: wgpu::PowerPreference::default(),
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
         }))
         .expect("wgpu adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::default(),
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
         .expect("wgpu device");
 
         let caps = surface.get_capabilities(&adapter);
@@ -133,6 +133,7 @@ impl WgpuPresenter {
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
             alpha_mode,
+            color_space: wgpu::SurfaceColorSpace::default(),
             view_formats: vec![],
         };
         surface.configure(&device, &config);
@@ -164,21 +165,21 @@ impl WgpuPresenter {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blit-pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs",
+                entry_point: Some("vs"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs",
+                entry_point: Some("fs"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,
@@ -189,7 +190,7 @@ impl WgpuPresenter {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -235,14 +236,14 @@ impl WgpuPresenter {
         }
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             rgba,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * w),
                 rows_per_image: Some(h),
@@ -255,8 +256,10 @@ impl WgpuPresenter {
         );
 
         let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(_) => {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            // Timeout / Occluded / Outdated / Lost / Validation — reconfigure and skip.
+            _ => {
                 self.surface.configure(&self.device, &self.config);
                 return;
             }
@@ -272,6 +275,7 @@ impl WgpuPresenter {
                 label: Some("blit-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -281,12 +285,13 @@ impl WgpuPresenter {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             rp.set_pipeline(&self.pipeline);
             rp.set_bind_group(0, &self.bind_group, &[]);
             rp.draw(0..3, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
     }
 }

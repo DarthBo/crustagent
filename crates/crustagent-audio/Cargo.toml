@@ -11,4 +11,4 @@ workspace = true
 
 [dependencies]
 crustagent = { path = "../crustagent" }
-rodio = "0.19"
+rodio = "0.22"
