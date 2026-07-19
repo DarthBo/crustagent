@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crustagent::{Agent, BalloonKind, Request};
+use crustagent_balloon::{balloon_size, paint_into, BalloonPaint, Font};
 use present::WgpuPresenter;
 
 use winit::application::ApplicationHandler;
@@ -113,14 +114,14 @@ fn font_pt(lf_height: i32) -> f32 {
 
 /// Build the balloon paint colors from the character's own balloon style, falling back to
 /// readable defaults if the file's colors are degenerate (e.g. text == background).
-fn balloon_paint(agent: &Agent, kind: BalloonKind) -> paint::BalloonPaint {
+fn balloon_paint(agent: &Agent, kind: BalloonKind) -> BalloonPaint {
     let s = agent.balloon_style();
     let (mut bg, mut text) = (s.bg, s.fg);
     if bg == text {
         bg = (0xFF, 0xFF, 0xE1);
         text = (0x10, 0x10, 0x10);
     }
-    paint::BalloonPaint {
+    BalloonPaint {
         bg: [bg.0, bg.1, bg.2],
         border: [s.border.0, s.border.1, s.border.2],
         text: [text.0, text.1, text.2],
@@ -168,7 +169,7 @@ struct App {
     // real balloon font (system TrueType); built lazily at the display's scale factor so
     // the text is DPI-correct (the balloon buffer is in physical pixels)
     font_spec: FontSpec,
-    font: Option<paint::Font>,
+    font: Option<Font>,
     font_scale: f32,
 
     // graceful shutdown: play Goodbye + Hide before exiting
@@ -332,7 +333,7 @@ impl App {
             return;
         }
         let s = &self.font_spec;
-        self.font = paint::Font::system(&s.family, (s.pt * scale).max(8.0), s.bold, s.italic);
+        self.font = Font::system(&s.family, (s.pt * scale).max(8.0), s.bold, s.italic);
         self.font_scale = scale;
     }
 
@@ -343,10 +344,18 @@ impl App {
         self.balloon_scratch.resize((w * h * 4) as usize, 0); // transparent
 
         if let Some(bv) = &balloon {
-            let mut canvas = paint::Canvas::new(&mut self.balloon_scratch, w, h);
             let style = balloon_paint(&self.agent, bv.kind);
             // The tail is centered on the window, which is sized to fit the balloon.
-            canvas.balloon(&bv.layout.lines, below, &style, self.font.as_ref(), self.font_scale);
+            paint_into(
+                &mut self.balloon_scratch,
+                w,
+                h,
+                &bv.layout.lines,
+                below,
+                &style,
+                self.font.as_ref(),
+                self.font_scale,
+            );
         }
     }
 }
@@ -536,7 +545,7 @@ impl ApplicationHandler for App {
             if let Some(scale) = self.char_window.as_ref().map(|w| w.scale_factor() as f32) {
                 self.ensure_font(scale);
             }
-            let (bw, bh) = paint::balloon_size(
+            let (bw, bh) = balloon_size(
                 self.font.as_ref(),
                 &bv.full.lines,
                 bv.full.cols,
@@ -567,8 +576,8 @@ fn main() {
 
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
-        let font = paint::Font::system("", 30.0, false, false); // ~15pt at 2× (retina) scale
-        let style = |think| paint::BalloonPaint {
+        let font = Font::system("", 30.0, false, false); // ~15pt at 2× (retina) scale
+        let style = |think| BalloonPaint {
             bg: [0xFF, 0xFF, 0xE1],
             border: [0x40, 0x40, 0x40],
             text: [0x10, 0x10, 0x10],
@@ -576,13 +585,12 @@ fn main() {
         };
         let render = |think: bool, text: &str| -> (Vec<u8>, u32, u32) {
             let lines = vec![text.to_string()];
-            let (w, h) = paint::balloon_size(font.as_ref(), &lines, text.len(), 1, 2.0, think);
+            let (w, h) = balloon_size(font.as_ref(), &lines, text.len(), 1, 2.0, think);
             let mut buf = vec![0x50u8; (w * h * 4) as usize];
             for px in buf.chunks_exact_mut(4) {
                 px[3] = 0xFF;
             }
-            let mut c = paint::Canvas::new(&mut buf, w, h);
-            c.balloon(&lines, false, &style(think), font.as_ref(), 2.0);
+            paint_into(&mut buf, w, h, &lines, false, &style(think), font.as_ref(), 2.0);
             (buf, w, h)
         };
         let (sb, sw, sh) = render(false, "Speech balloon");

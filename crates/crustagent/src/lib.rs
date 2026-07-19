@@ -33,14 +33,14 @@ use crustagent_core::{
     parse_speech, sequence_animation, sequence_exit, wrap_last_rows, wrap_words, BalloonLayout,
     Character, Direction, IdleDirector, MoveTo, SplitMix64,
 };
-use crustagent_format::{char_style, AcsFile, MouthOverlay, ReturnKind, Rgba};
+use crustagent_format::{char_style, AcsFile, ReturnKind};
 
 /// How long an auto-hiding balloon lingers, fully revealed, before disappearing (ms).
 const AUTO_HIDE_MS: u32 = 3000;
 /// Per-word reveal pacing for a silent `Think` balloon (ms).
 const THINK_PACE_MS: u32 = 300;
 
-pub use crustagent_format::{self as format, AcsFile as CharacterFile};
+pub use crustagent_format::{self as format, AcsFile as CharacterFile, MouthOverlay, Rgba};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent};
 
 /// A high-level request enqueued on the [`Agent`].
@@ -941,6 +941,20 @@ impl Agent {
         } else {
             None
         }
+    }
+
+    /// A cheap identity for the frame [`composite_current`](Agent::composite_current) would
+    /// return right now: the `(animation index, frame index, mouth overlay)` triple, or
+    /// `None` when hidden. Two ticks with equal tokens composite to byte-identical pixels,
+    /// so a host can skip re-compositing / re-encoding / re-uploading while the token is
+    /// unchanged — and use it as a content-address key when caching frames across a process
+    /// boundary (e.g. shipping PNGs to a separate UI process).
+    pub fn current_frame_token(&self) -> Option<(usize, usize, Option<MouthOverlay>)> {
+        if !self.visible {
+            return None;
+        }
+        let tf = self.track_frame()?;
+        Some((tf.anim, tf.frame, self.current_mouth()))
     }
 
     /// Composite the frame that should be on screen now, or `None` when hidden.

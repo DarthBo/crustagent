@@ -1,0 +1,16 @@
+[package]
+name = "crustagent-balloon"
+description = "Software renderer for Microsoft Agent word balloons: system-font text layout + speech/think balloon painting into an RGBA buffer. No windowing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+fontdue = "0.9.3"
+fontdb = "0.23.0"
+font8x8 = "0.3"
+
+[lints]
+workspace = true

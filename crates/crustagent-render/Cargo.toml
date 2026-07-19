@@ -12,9 +12,8 @@ workspace = true
 crustagent = { path = "../crustagent" }
 crustagent-format = { path = "../crustagent-format" }
 crustagent-audio = { path = "../crustagent-audio" }
+crustagent-balloon = { path = "../crustagent-balloon" }
 winit = "0.30"
 wgpu = "22"
 pollster = "0.3"
 font8x8 = "0.3"
-fontdue = "0.9.3"
-fontdb = "0.23.0"

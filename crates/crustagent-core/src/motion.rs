@@ -32,13 +32,24 @@ impl Direction {
         }
     }
 
-    /// The `MOVING*` state name for this direction.
+    /// The `MOVING*` state name for travel in this (screen) direction.
+    ///
+    /// **Horizontal is mirrored on purpose.** Microsoft Agent's `MOVINGLEFT`/`MOVINGRIGHT`
+    /// animations are authored from the *character's* own perspective, not the screen's: a
+    /// character walking toward the **right of the screen** plays `MOVINGLEFT` (it is moving
+    /// to *its* left as it faces the viewer), and vice-versa. So travel `Direction::Right`
+    /// maps to `"MOVINGLEFT"`. Vertical is not mirrored. This matches clippy.js
+    /// (`_getDirection` swaps L/R for the same reason) and was verified against Merlin on
+    /// real GNOME — the screen-literal mapping played his left/right flights reversed.
+    ///
+    /// Pointing/gesturing is *not* mirrored (it is described from the viewer's side); see
+    /// [`gesture_state`](Direction::gesture_state).
     pub fn move_state(self) -> &'static str {
         match self {
             Direction::Up => "MOVINGUP",
             Direction::Down => "MOVINGDOWN",
-            Direction::Left => "MOVINGLEFT",
-            Direction::Right => "MOVINGRIGHT",
+            Direction::Left => "MOVINGRIGHT",
+            Direction::Right => "MOVINGLEFT",
         }
     }
 
@@ -125,7 +136,14 @@ mod tests {
     #[test]
     fn state_names() {
         assert_eq!(Direction::Up.move_state(), "MOVINGUP");
+        assert_eq!(Direction::Down.move_state(), "MOVINGDOWN");
+        // Horizontal move states are mirrored (character's perspective): travelling
+        // screen-right plays MOVINGLEFT and vice-versa.
+        assert_eq!(Direction::Right.move_state(), "MOVINGLEFT");
+        assert_eq!(Direction::Left.move_state(), "MOVINGRIGHT");
+        // Gestures are NOT mirrored (viewer's perspective).
         assert_eq!(Direction::Left.gesture_state(), "GESTURINGLEFT");
+        assert_eq!(Direction::Right.gesture_state(), "GESTURINGRIGHT");
     }
 
     #[test]
