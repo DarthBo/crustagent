@@ -26,6 +26,7 @@ crates/
   crustagent/          # embedding API: Agent + serial action queue (start here to embed)
   crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACS 1.5, ACF header)
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
+  crustagent-balloon/  # windowing-free balloon painter: BalloonView + BalloonStyle -> RGBA
   crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SystemTts
   crustagent-audio/    # sound-effect playback (rodio) — the character's embedded WAVs
   crustagent-gif/      # dependency-free animated GIF89a encoder (round-trip tested)
@@ -35,6 +36,10 @@ crates/
 The viewer uses two windows, MS-Agent-style: a **tight, non-resizable character window**
 and a **separate balloon window** that appears above the character (or below, near the
 screen top) while it speaks. Both are transparent, borderless, and always-on-top (`wgpu`).
+The balloon pixels themselves are drawn by `crustagent-balloon` — a light,
+windowing-free painter (`fontdue`/`fontdb`/`font8x8`, no winit/wgpu) that rasterizes a
+`BalloonView` + `BalloonStyle` into an RGBA buffer, so a host can place the balloon in its
+own surface without pulling in the viewer.
 
 ### Embed it
 
