@@ -142,5 +142,7 @@ The `.acs` format and the character artwork belong to Microsoft and the original
 authors; **no character assets are included in this repository**. crustagent's format and
 behavior were reverse-engineered from — and in places ported from — the
 [DoubleAgent](https://sourceforge.net/projects/doubleagent/) source (Cinnamon Software
-Inc.), which is GPL/LGPL. As a derivative work, crustagent is licensed **GPL-3.0-or-later**
-(see [`LICENSE`](LICENSE)); attribution and third-party notices are in [`NOTICE`](NOTICE).
+Inc.), which is dual GPL/LGPL. Taking its LGPL option, crustagent is licensed
+**LGPL-3.0-or-later** (see [`COPYING.LESSER`](COPYING.LESSER) + [`COPYING`](COPYING)) — so
+it can be linked from projects under other licenses; attribution and third-party notices
+are in [`NOTICE`](NOTICE).

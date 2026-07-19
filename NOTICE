@@ -2,9 +2,9 @@ crustagent
 Copyright (C) 2025-2026 Tibault Damman and the crustagent authors
 
 This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version. See the LICENSE file for the full text.
+the terms of the GNU Lesser General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See the COPYING.LESSER and COPYING files for the full text.
 
 ================================================================================
 Derivation and attribution
@@ -20,11 +20,10 @@ of:
   https://sourceforge.net/projects/doubleagent/
   Licensed GPL / LGPL.
 
-As a work derived from DoubleAgent, crustagent is distributed under the GNU
-General Public License, version 3 or later. Portions of the following modules in
-particular follow DoubleAgent's implementation closely and are best understood as
-ports of it (see the source comments, which cite the corresponding DoubleAgent
-functions and line ranges):
+DoubleAgent is offered under the GPL or the LGPL; crustagent takes the LGPL
+option and is distributed under the GNU Lesser General Public License, version 3
+or later. Portions of the following modules in particular follow DoubleAgent's
+implementation closely and are best understood as ports of it:
 
   - crustagent-format: the ACS 2.0 / ACS 1.5 readers, the LZ77 image
     decompressor (CAgentFileBinary::DecodeData), and the frame compositor
