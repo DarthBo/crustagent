@@ -1,5 +1,9 @@
 # crustagent
 
+<p align="center">
+  <img src="assets/crustagent.png" alt="The crustagent mascot: a pixel-art crab in a sunhat and dark glasses" width="200">
+</p>
+
 Use classic **Microsoft Agent** characters — *Clippy, Merlin, Genie, Peedy, Robby* — in
 modern, cross-platform apps, from safe **Rust**.
 
