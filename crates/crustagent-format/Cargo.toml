@@ -4,6 +4,7 @@ description = "Parsers for Microsoft Agent character files (.acs, .acf, .acd)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lints]
 workspace = true
