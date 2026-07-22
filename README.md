@@ -28,7 +28,7 @@ these lovingly-made characters usable again wherever Rust runs.
 ```
 crates/
   crustagent/          # embedding API: Agent + serial action queue (start here to embed)
-  crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACS 1.5, ACF header)
+  crustagent-format/   # pure parsers for the character file formats (ACS 2.0, ACS 1.5, ACF header, Actor/ACT)
   crustagent-core/     # portable runtime: sequencing, idle, motion, balloon layout, text
   crustagent-balloon/  # windowing-free balloon painter: BalloonView + BalloonStyle -> RGBA
   crustagent-tts/      # pluggable text-to-speech: VoiceEvent stream + TimedTts/SystemTts
@@ -103,10 +103,17 @@ Implemented:
   sound extraction, and a **frame compositor** to RGBA/indexed.
 - **ACS 1.5** — the older **OLE2 compound-document** format (a `char.acf` header stream +
   one compressed stream per animation), normalized into the same `AcsFile`.
+- **ACT** (`ActFile`) — the *Microsoft Actor* character table that preceded Agent (the
+  Office 97/98 Assistants — Clippit, Rover, The Genius — and Microsoft Bob), in both the
+  little-endian PC and big-endian classic-Mac byte orders. Parses the container (identity,
+  palette, embedded WAV sounds) and **rasterizes the vector metafile (WMF) cels to RGBA**.
+  The newer compressed-bitmap (The Genius) and classic-Mac artwork codecs are not decoded
+  yet — those files still parse and report their artwork format.
 
-Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), and a small set of
-files with an obfuscated/variant 2.0 char-info block. Run the `sweep` example to audit a
-character library against the parser.
+Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the ACT bitmap/Mac
+artwork codecs and animation/state tables, and a small set of files with an
+obfuscated/variant 2.0 char-info block. Run the `sweep` example to audit a character
+library against the parser.
 
 ## `crustagent-core` — status
 
@@ -138,6 +145,7 @@ cargo run -p crustagent-format --example dump     -- assets/agents/Merlin.acs
 cargo run -p crustagent-format --example render   -- assets/agents/Merlin.acs Greet 0   # one frame -> PNG
 cargo run -p crustagent-core   --example sequence -- assets/agents/Merlin.acs Greet     # print the timeline
 cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs GetAttention  # gesture -> GIF
+cargo run -p crustagent-format --example act_dump -- assets/agents/ACT/clippit.act 0 clip.png # Actor cel -> PNG
 
 # See it on your desktop (transparent, always-on-top):
 cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles
