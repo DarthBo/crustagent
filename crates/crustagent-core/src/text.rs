@@ -279,9 +279,29 @@ fn read_quoted(chars: &[char], k: usize) -> Option<(String, usize)> {
 fn is_known_tag(lname: &str) -> bool {
     matches!(
         lname,
-        "chr" | "com" | "ctx" | "dem" | "emp" | "eng" | "lst" | "map" | "mrk" | "pau" | "pit"
-            | "pra" | "prn" | "pro" | "prt" | "rst" | "rms" | "rmw" | "rpit" | "rprn" | "rspd"
-            | "spd" | "vol"
+        "chr"
+            | "com"
+            | "ctx"
+            | "dem"
+            | "emp"
+            | "eng"
+            | "lst"
+            | "map"
+            | "mrk"
+            | "pau"
+            | "pit"
+            | "pra"
+            | "prn"
+            | "pro"
+            | "prt"
+            | "rst"
+            | "rms"
+            | "rmw"
+            | "rpit"
+            | "rprn"
+            | "rspd"
+            | "spd"
+            | "vol"
     )
 }
 
@@ -389,7 +409,10 @@ mod tests {
         assert_eq!(p.display_words, ["!"]);
         assert_eq!(
             p.speech,
-            vec![SpeechItem::Tag(Tag::Emphasize), SpeechItem::Word("wow".into())]
+            vec![
+                SpeechItem::Tag(Tag::Emphasize),
+                SpeechItem::Word("wow".into())
+            ]
         );
     }
 

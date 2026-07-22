@@ -205,10 +205,7 @@ pub fn sequence_exit(anim: &Animation, from_frame: usize) -> AnimationSequence {
 /// entry that drives the roll `<= 0` and targets an in-range frame wins. Otherwise (no
 /// branching, or nothing selected) advance sequentially.
 fn next_frame(frame: &Frame, current: usize, count: usize, rng: &mut impl BranchRng) -> usize {
-    let has_branch = frame
-        .branching
-        .first()
-        .is_some_and(|b| b.probability != 0);
+    let has_branch = frame.branching.first().is_some_and(|b| b.probability != 0);
     if has_branch {
         let mut r = rng.roll_1_100() as i64;
         for b in frame.branching.iter().take(3) {
@@ -264,9 +261,30 @@ mod tests {
         let seq = sequence_animation(&a, &mut rng);
 
         assert_eq!(seq.len(), 3);
-        assert_eq!(seq.frames[0], SeqFrame { frame: 0, start_cs: 0, duration_cs: 10 });
-        assert_eq!(seq.frames[1], SeqFrame { frame: 1, start_cs: 10, duration_cs: 20 });
-        assert_eq!(seq.frames[2], SeqFrame { frame: 2, start_cs: 30, duration_cs: 5 });
+        assert_eq!(
+            seq.frames[0],
+            SeqFrame {
+                frame: 0,
+                start_cs: 0,
+                duration_cs: 10
+            }
+        );
+        assert_eq!(
+            seq.frames[1],
+            SeqFrame {
+                frame: 1,
+                start_cs: 10,
+                duration_cs: 20
+            }
+        );
+        assert_eq!(
+            seq.frames[2],
+            SeqFrame {
+                frame: 2,
+                start_cs: 30,
+                duration_cs: 5
+            }
+        );
         assert_eq!(seq.total_cs, 35);
         assert_eq!(seq.total_ms(), 350);
         assert_eq!(seq.loop_start_cs, None);
@@ -296,25 +314,30 @@ mod tests {
         // roll 25 (<=30) picks the first branch -> frame 2.
         let mut low = ScriptedRng::new(vec![25]);
         let seq = sequence_animation(&a, &mut low);
-        assert_eq!(seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(
+            seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
 
         // roll 80 (>30, then 80-30=50<=70) picks second branch -> frame 1, then frame 2.
         let mut high = ScriptedRng::new(vec![80]);
         let seq = sequence_animation(&a, &mut high);
-        assert_eq!(seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
     fn detects_loop_and_reports_start() {
         // 0 -> 1 -> 2 -> back to 1 (100%). Loop starts at frame 1 (start_cs = 10).
-        let a = anim(vec![
-            frame(10, &[]),
-            frame(20, &[]),
-            frame(5, &[(1, 100)]),
-        ]);
+        let a = anim(vec![frame(10, &[]), frame(20, &[]), frame(5, &[(1, 100)])]);
         let mut rng = SplitMix64::new(1);
         let seq = sequence_animation(&a, &mut rng);
-        assert_eq!(seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert_eq!(seq.loop_start_cs, Some(10));
         assert!(!seq.truncated);
     }
@@ -341,7 +364,10 @@ mod tests {
         let a = anim(vec![f0, f1, f2]);
 
         let seq = sequence_exit(&a, 0);
-        assert_eq!(seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(
+            seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
         assert_eq!(seq.total_cs, 15);
         assert!(!seq.truncated);
     }
@@ -355,7 +381,10 @@ mod tests {
         let a = anim(vec![f0, f1]);
         // Starting the exit at frame 1 plays only frame 1.
         let seq = sequence_exit(&a, 1);
-        assert_eq!(seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            seq.frames.iter().map(|f| f.frame).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]

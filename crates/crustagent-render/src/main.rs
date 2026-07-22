@@ -447,7 +447,8 @@ impl ApplicationHandler for App {
                     let (cx, cy) = self.cursor;
                     match button {
                         MouseButton::Right => {
-                            self.agent.report_click(crustagent::MouseButton::Right, cx, cy);
+                            self.agent
+                                .report_click(crustagent::MouseButton::Right, cx, cy);
                             let screen = self
                                 .char_window
                                 .as_ref()
@@ -460,7 +461,8 @@ impl ApplicationHandler for App {
                             }
                         }
                         MouseButton::Left => {
-                            self.agent.report_click(crustagent::MouseButton::Left, cx, cy);
+                            self.agent
+                                .report_click(crustagent::MouseButton::Left, cx, cy);
                             if self.menu_open {
                                 self.close_menu();
                             } else if let Some(window) = &self.char_window {
@@ -575,7 +577,10 @@ fn main() {
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
     if let Some(i) = args.iter().position(|a| a == "--balloon-png") {
-        let out = args.get(i + 1).cloned().unwrap_or_else(|| "balloon.png".into());
+        let out = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "balloon.png".into());
         let font = Font::system("", 30.0, false, false); // ~15pt at 2× (retina) scale
         let style = |think| BalloonPaint {
             bg: [0xFF, 0xFF, 0xE1],
@@ -590,7 +595,16 @@ fn main() {
             for px in buf.chunks_exact_mut(4) {
                 px[3] = 0xFF;
             }
-            paint_into(&mut buf, w, h, &lines, false, &style(think), font.as_ref(), 2.0);
+            paint_into(
+                &mut buf,
+                w,
+                h,
+                &lines,
+                false,
+                &style(think),
+                font.as_ref(),
+                2.0,
+            );
             (buf, w, h)
         };
         let (sb, sw, sh) = render(false, "Speech balloon");
@@ -611,16 +625,33 @@ fn main() {
         blit(&sb, sw, sh, 0);
         blit(&tb, tw, th, sh + gap);
         std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
-        println!("wrote {out} ({w}x{h}, font: {})", if font.is_some() { "system" } else { "8x8 fallback" });
+        println!(
+            "wrote {out} ({w}x{h}, font: {})",
+            if font.is_some() {
+                "system"
+            } else {
+                "8x8 fallback"
+            }
+        );
         return;
     }
 
     if let Some(i) = args.iter().position(|a| a == "--menu-png") {
-        let out = args.get(i + 1).cloned().unwrap_or_else(|| "menu.png".into());
-        let labels: Vec<String> = ["Hide", "Speak", "Acknowledge", "Blink", "Congratulate", "Greet"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let out = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "menu.png".into());
+        let labels: Vec<String> = [
+            "Hide",
+            "Speak",
+            "Acknowledge",
+            "Blink",
+            "Congratulate",
+            "Greet",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let (w, h) = (220u32, (labels.len() as i32 * paint::MENU_ROW_H + 4) as u32);
         let mut buf = vec![0u8; (w * h * 4) as usize];
         let mut canvas = paint::Canvas::new(&mut buf, w, h);
@@ -676,7 +707,11 @@ fn main() {
         agent.show();
     }
 
-    let name = agent.file().default_name().map(|n| n.name.clone()).unwrap_or_default();
+    let name = agent
+        .file()
+        .default_name()
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
     println!("{name}: right-click for a menu · left-drag to move · Esc/Q to quit");
     println!("(pass --tts for audible speech)");
 

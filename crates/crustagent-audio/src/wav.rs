@@ -130,7 +130,11 @@ fn decode_pcm(data: &[u8], bits: u16) -> Option<Vec<i16>> {
 /// One 4-bit ADPCM nibble → next sample, updating the per-channel predictor state.
 #[inline]
 fn adpcm_nibble(nib: u8, c1: i32, c2: i32, delta: &mut i32, s1: &mut i32, s2: &mut i32) -> i16 {
-    let signed = if nib >= 8 { nib as i32 - 16 } else { nib as i32 };
+    let signed = if nib >= 8 {
+        nib as i32 - 16
+    } else {
+        nib as i32
+    };
     let pred = (*s1 * c1 + *s2 * c2) >> 8;
     let val = (pred + signed * *delta).clamp(-32768, 32767);
     *delta = (ADAPT[nib as usize] * *delta) >> 8;
@@ -185,11 +189,39 @@ fn decode_ms_adpcm(data: &[u8], fmt: &Fmt) -> Vec<i16> {
             let hi = byte >> 4;
             let lo = byte & 0x0F;
             if ch == 1 {
-                out.push(adpcm_nibble(hi, c1[0], c2[0], &mut delta[0], &mut s1[0], &mut s2[0]));
-                out.push(adpcm_nibble(lo, c1[0], c2[0], &mut delta[0], &mut s1[0], &mut s2[0]));
+                out.push(adpcm_nibble(
+                    hi,
+                    c1[0],
+                    c2[0],
+                    &mut delta[0],
+                    &mut s1[0],
+                    &mut s2[0],
+                ));
+                out.push(adpcm_nibble(
+                    lo,
+                    c1[0],
+                    c2[0],
+                    &mut delta[0],
+                    &mut s1[0],
+                    &mut s2[0],
+                ));
             } else {
-                out.push(adpcm_nibble(hi, c1[0], c2[0], &mut delta[0], &mut s1[0], &mut s2[0]));
-                out.push(adpcm_nibble(lo, c1[1], c2[1], &mut delta[1], &mut s1[1], &mut s2[1]));
+                out.push(adpcm_nibble(
+                    hi,
+                    c1[0],
+                    c2[0],
+                    &mut delta[0],
+                    &mut s1[0],
+                    &mut s2[0],
+                ));
+                out.push(adpcm_nibble(
+                    lo,
+                    c1[1],
+                    c2[1],
+                    &mut delta[1],
+                    &mut s1[1],
+                    &mut s2[1],
+                ));
             }
         }
     }

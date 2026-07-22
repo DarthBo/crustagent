@@ -44,7 +44,10 @@ fn main() {
     );
     println!("Palette   : {} entries", chr.header.palette.len());
     if let Some(tts) = &chr.tts {
-        println!("TTS       : engine {}  speed {}  pitch {}", tts.engine, tts.speed, tts.pitch);
+        println!(
+            "TTS       : engine {}  speed {}  pitch {}",
+            tts.engine, tts.speed, tts.pitch
+        );
     }
     if let Some(b) = &chr.balloon {
         println!(

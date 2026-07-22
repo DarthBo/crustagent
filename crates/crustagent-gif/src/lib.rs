@@ -97,7 +97,11 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> BitWriter {
-        BitWriter { acc: 0, nbits: 0, bytes: Vec::new() }
+        BitWriter {
+            acc: 0,
+            nbits: 0,
+            bytes: Vec::new(),
+        }
     }
     fn write(&mut self, code: u32, size: u32) {
         self.acc |= code << self.nbits;

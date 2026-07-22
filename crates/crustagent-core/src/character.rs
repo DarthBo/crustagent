@@ -46,8 +46,7 @@ impl<'a> Character<'a> {
         name: &str,
         rng: &mut impl BranchRng,
     ) -> Option<AnimationSequence> {
-        self.animation(name)
-            .map(|a| sequence_animation(a, rng))
+        self.animation(name).map(|a| sequence_animation(a, rng))
     }
 
     /// Build the sequence for the animation the engine would play *first* for a state

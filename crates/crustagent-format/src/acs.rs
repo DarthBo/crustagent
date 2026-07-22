@@ -360,16 +360,16 @@ impl AcsFile {
                 continue;
             }
             let fi = frame.images[i];
-            let src = pool
-                .get(fi.image_ndx as usize)
-                .ok_or(Error::BadImage { index: fi.image_ndx as usize })?;
+            let src = pool.get(fi.image_ndx as usize).ok_or(Error::BadImage {
+                index: fi.image_ndx as usize,
+            })?;
             alpha_over(&mut canvas, src, fi.offset);
         }
 
         if let Some(o) = overlay {
-            let src = pool
-                .get(o.image_ndx as usize)
-                .ok_or(Error::BadImage { index: o.image_ndx as usize })?;
+            let src = pool.get(o.image_ndx as usize).ok_or(Error::BadImage {
+                index: o.image_ndx as usize,
+            })?;
             alpha_over(&mut canvas, src, o.offset);
         }
 
@@ -590,12 +590,14 @@ fn parse_gestures(data: &[u8], blk: Block) -> Result<(Vec<String>, Vec<Animation
 
 fn parse_animation(data: &[u8], offset: usize, size: usize, name_hint: &str) -> Result<Animation> {
     let end = offset.saturating_add(size);
-    let slice = data.get(offset..end.min(data.len())).ok_or(Error::UnexpectedEof {
-        context: "animation record",
-        offset,
-        needed: size,
-        available: data.len().saturating_sub(offset),
-    })?;
+    let slice = data
+        .get(offset..end.min(data.len()))
+        .ok_or(Error::UnexpectedEof {
+            context: "animation record",
+            offset,
+            needed: size,
+            available: data.len().saturating_sub(offset),
+        })?;
     let mut c = Cursor::new(slice);
 
     let name = c.string(true)?;

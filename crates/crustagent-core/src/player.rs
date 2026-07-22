@@ -17,10 +17,7 @@ pub struct Player {
 impl Player {
     /// Start a player at time zero for `seq`.
     pub fn new(seq: AnimationSequence) -> Player {
-        Player {
-            seq,
-            elapsed_ms: 0,
-        }
+        Player { seq, elapsed_ms: 0 }
     }
 
     /// The sequence being played.
@@ -89,8 +86,16 @@ mod tests {
     fn play_once() -> AnimationSequence {
         AnimationSequence {
             frames: vec![
-                SeqFrame { frame: 0, start_cs: 0, duration_cs: 10 },
-                SeqFrame { frame: 1, start_cs: 10, duration_cs: 20 },
+                SeqFrame {
+                    frame: 0,
+                    start_cs: 0,
+                    duration_cs: 10,
+                },
+                SeqFrame {
+                    frame: 1,
+                    start_cs: 10,
+                    duration_cs: 20,
+                },
             ],
             total_cs: 30,
             loop_start_cs: None,

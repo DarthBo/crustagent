@@ -216,9 +216,14 @@ fn resolve_balloon_style(file: &AcsFile) -> BalloonStyle {
     BalloonStyle {
         fg: b.map(|b| rgb(&b.fg_color)).unwrap_or((0x00, 0x00, 0x00)),
         bg: b.map(|b| rgb(&b.bg_color)).unwrap_or((0xFF, 0xFF, 0xE1)),
-        border: b.map(|b| rgb(&b.border_color)).unwrap_or((0x40, 0x40, 0x40)),
+        border: b
+            .map(|b| rgb(&b.border_color))
+            .unwrap_or((0x40, 0x40, 0x40)),
         lines: b.map(|b| b.lines as usize).filter(|&n| n > 0).unwrap_or(2),
-        per_line: b.map(|b| b.per_line as usize).filter(|&n| n > 0).unwrap_or(32),
+        per_line: b
+            .map(|b| b.per_line as usize)
+            .filter(|&n| n > 0)
+            .unwrap_or(32),
         size_to_text: flags & char_style::SIZE_TO_TEXT != 0,
         auto_hide: flags & char_style::NO_AUTO_HIDE == 0,
         auto_pace: flags & char_style::NO_AUTO_PACE == 0,
@@ -362,7 +367,10 @@ impl Agent {
 
     /// Character frame size in pixels.
     pub fn size(&self) -> (u32, u32) {
-        (self.file.header.image_size.0 as u32, self.file.header.image_size.1 as u32)
+        (
+            self.file.header.image_size.0 as u32,
+            self.file.header.image_size.1 as u32,
+        )
     }
 
     /// Whether the character is currently auto-idling (an idle animation or the rest
@@ -502,7 +510,11 @@ impl Agent {
         let parsed = parse_speech(&text);
         let spoken = parsed.spoken_text();
         self.speak_mouth = None;
-        let kind = if think { BalloonKind::Think } else { BalloonKind::Speak };
+        let kind = if think {
+            BalloonKind::Think
+        } else {
+            BalloonKind::Speak
+        };
         self.begin_balloon(kind, parsed.display_words, parsed.bookmark_at);
         let words = self.speak_words.len().max(1);
         if think {
@@ -691,7 +703,11 @@ impl Agent {
             self.speak_shown = self.speak_words.len();
             self.fire_bookmarks();
             self.balloon_done = true;
-            self.balloon_hold_ms = if self.style.auto_hide { AUTO_HIDE_MS } else { u32::MAX };
+            self.balloon_hold_ms = if self.style.auto_hide {
+                AUTO_HIDE_MS
+            } else {
+                u32::MAX
+            };
             if !think {
                 self.emit(Event::SpeechEnded);
             }
@@ -722,7 +738,12 @@ impl Agent {
     }
 
     /// Set up the balloon for a new speak/think phrase.
-    fn begin_balloon(&mut self, kind: BalloonKind, words: Vec<String>, bookmarks: Vec<(i64, usize)>) {
+    fn begin_balloon(
+        &mut self,
+        kind: BalloonKind,
+        words: Vec<String>,
+        bookmarks: Vec<(i64, usize)>,
+    ) {
         self.clear_balloon(); // replace any lingering balloon (emits BalloonHidden)
         self.speak_words = words;
         self.speak_shown = if self.style.auto_pace {
@@ -731,7 +752,8 @@ impl Agent {
             self.speak_words.len()
         };
         self.pending_bookmarks = bookmarks;
-        self.pending_bookmarks.sort_by_key(|&(_, threshold)| threshold);
+        self.pending_bookmarks
+            .sort_by_key(|&(_, threshold)| threshold);
         self.balloon_kind = Some(kind);
         self.balloon_done = false;
         self.balloon_hold_ms = 0;
@@ -816,7 +838,11 @@ impl Agent {
                         let track: Vec<TrackFrame> = seq
                             .frames
                             .iter()
-                            .map(|e| TrackFrame { anim: idx, frame: e.frame, dur_ms: (e.duration_cs as u32 * 10).max(1) })
+                            .map(|e| TrackFrame {
+                                anim: idx,
+                                frame: e.frame,
+                                dur_ms: (e.duration_cs as u32 * 10).max(1),
+                            })
                             .collect();
                         (track, seq.loop_start_cs.map(|cs| cs * 10))
                     };
@@ -860,9 +886,11 @@ impl Agent {
                 // Freeze the current frame for `ms`. Reduce the track to just that frame —
                 // otherwise the old (longer) track's timeline gets replayed from the start
                 // over `ms`, so a wait after a gesture looks like the gesture playing again.
-                let held = self
-                    .track_frame()
-                    .map(|f| TrackFrame { anim: f.anim, frame: f.frame, dur_ms: ms.max(1) });
+                let held = self.track_frame().map(|f| TrackFrame {
+                    anim: f.anim,
+                    frame: f.frame,
+                    dur_ms: ms.max(1),
+                });
                 self.track = held.into_iter().collect();
                 self.track_loops = false;
                 self.track_loop_start_ms = 0;
@@ -941,7 +969,11 @@ impl Agent {
                     let track: Vec<TrackFrame> = seq
                         .frames
                         .iter()
-                        .map(|e| TrackFrame { anim: i, frame: e.frame, dur_ms: (e.duration_cs as u32 * 10).max(1) })
+                        .map(|e| TrackFrame {
+                            anim: i,
+                            frame: e.frame,
+                            dur_ms: (e.duration_cs as u32 * 10).max(1),
+                        })
                         .collect();
                     (track, seq.loop_start_cs.map(|cs| cs * 10))
                 };
@@ -1031,7 +1063,11 @@ impl Agent {
                 sequence_exit(anim, exit_from as usize)
                     .frames
                     .iter()
-                    .map(|e| TrackFrame { anim: i, frame: e.frame, dur_ms: (e.duration_cs as u32 * 10).max(1) })
+                    .map(|e| TrackFrame {
+                        anim: i,
+                        frame: e.frame,
+                        dur_ms: (e.duration_cs as u32 * 10).max(1),
+                    })
                     .collect()
             }
         };
@@ -1138,7 +1174,11 @@ impl Agent {
         // A single static frame from RestPose (or animation 0), held briefly.
         let idx = self
             .anim_index("RestPose")
-            .or(if self.file.animations.is_empty() { None } else { Some(0) });
+            .or(if self.file.animations.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
         self.track = idx
             .map(|anim| {
                 vec![TrackFrame {
@@ -1166,12 +1206,15 @@ impl Agent {
                 self.track_elapsed_ms // first pass: play the intro (takeoff) once
             } else {
                 // then repeat only [loop_start, total) — the hold/fly, not the intro.
-                let ls = self.track_loop_start_ms.min(self.track_total_ms.saturating_sub(1));
+                let ls = self
+                    .track_loop_start_ms
+                    .min(self.track_total_ms.saturating_sub(1));
                 let loop_len = (self.track_total_ms - ls).max(1);
                 ls + (self.track_elapsed_ms - ls) % loop_len
             }
         } else {
-            self.track_elapsed_ms.min(self.track_total_ms.saturating_sub(1))
+            self.track_elapsed_ms
+                .min(self.track_total_ms.saturating_sub(1))
         };
         let mut acc = 0;
         for (i, f) in self.track.iter().enumerate() {

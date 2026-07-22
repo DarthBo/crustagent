@@ -54,10 +54,12 @@ fn main() {
         let seq = sequence_animation(anim, &mut rng);
         for e in &seq.frames {
             let frame = &anim.frames[e.frame];
-            let img = chr.composite_frame_indexed(frame, None).unwrap_or_else(|err| {
-                eprintln!("composite {} frame {}: {err}", anim.name, e.frame);
-                std::process::exit(1);
-            });
+            let img = chr
+                .composite_frame_indexed(frame, None)
+                .unwrap_or_else(|err| {
+                    eprintln!("composite {} frame {}: {err}", anim.name, e.frame);
+                    std::process::exit(1);
+                });
             gif.add_frame(&img.indices, e.duration_cs);
         }
         total_frames += seq.len();

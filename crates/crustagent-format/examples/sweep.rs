@@ -24,7 +24,9 @@ fn wav_tag(b: &[u8]) -> Option<u16> {
 
 fn main() {
     std::panic::set_hook(Box::new(|_| {})); // silence per-file panic spew
-    let dir = std::env::args().nth(1).unwrap_or_else(|| "assets/agents".into());
+    let dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "assets/agents".into());
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("read dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -84,7 +86,10 @@ fn main() {
         }
     }
 
-    println!("swept {total} files: {ok} parsed ok, {} failed to parse\n", parse_err.len());
+    println!(
+        "swept {total} files: {ok} parsed ok, {} failed to parse\n",
+        parse_err.len()
+    );
 
     if !parse_err.is_empty() {
         println!("== PARSE FAILURES ({}) ==", parse_err.len());

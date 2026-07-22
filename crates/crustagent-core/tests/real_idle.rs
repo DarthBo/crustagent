@@ -21,10 +21,15 @@ fn idle_picks_valid_animations_and_escalates() {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("acs")) {
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("acs"))
+        {
             continue;
         }
-        let Ok(chr) = AcsFile::open(&path) else { continue };
+        let Ok(chr) = AcsFile::open(&path) else {
+            continue;
+        };
         let ch = Character::new(&chr);
 
         // Only meaningful for characters that actually define idle states.

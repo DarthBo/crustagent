@@ -121,14 +121,19 @@ impl Font {
         // Colour-emoji fallback: the first installed system emoji family (names differ per
         // platform — Apple Color Emoji / Segoe UI Emoji / Noto Color Emoji). swash reads
         // whichever colour-glyph format the face uses (sbix / COLR / CBDT).
-        font.emoji = ["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"]
-            .iter()
-            .find_map(|n| {
-                db.query(&fontdb::Query {
-                    families: &[fontdb::Family::Name(n)],
-                    ..Default::default()
-                })
-            });
+        font.emoji = [
+            "Apple Color Emoji",
+            "Segoe UI Emoji",
+            "Noto Color Emoji",
+            "Twemoji Mozilla",
+        ]
+        .iter()
+        .find_map(|n| {
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(n)],
+                ..Default::default()
+            })
+        });
         font.db = db;
         Some(font)
     }
@@ -320,10 +325,21 @@ pub fn paint_balloon(
     font: Option<&Font>,
     scale: f32,
 ) -> BalloonImage {
-    let (w, h) = balloon_size(font, lines, min_cols, rows.max(lines.len()), scale, paint.think);
+    let (w, h) = balloon_size(
+        font,
+        lines,
+        min_cols,
+        rows.max(lines.len()),
+        scale,
+        paint.think,
+    );
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     paint_into(&mut rgba, w, h, lines, below, paint, font, scale);
-    BalloonImage { rgba, width: w, height: h }
+    BalloonImage {
+        rgba,
+        width: w,
+        height: h,
+    }
 }
 
 /// Paint a balloon that fills a caller-provided top-down RGBA8 buffer of size `w`×`h`
@@ -340,7 +356,12 @@ pub fn paint_into(
     font: Option<&Font>,
     scale: f32,
 ) {
-    Canvas { buf, w: w as i32, h: h as i32 }.balloon(lines, below, paint, font, scale);
+    Canvas {
+        buf,
+        w: w as i32,
+        h: h as i32,
+    }
+    .balloon(lines, below, paint, font, scale);
 }
 
 /// A borrowed RGBA8 drawing target (top-down, non-premultiplied).
@@ -453,7 +474,13 @@ impl Canvas<'_> {
             // rasterized as RGBA and composited straight.
             if !font.has_text_glyph(c) {
                 if let Some(g) = font.render_emoji(c) {
-                    self.blit_rgba(pen.round() as i32 + g.left, baseline - g.top, g.width, g.height, &g.rgba);
+                    self.blit_rgba(
+                        pen.round() as i32 + g.left,
+                        baseline - g.top,
+                        g.width,
+                        g.height,
+                        &g.rgba,
+                    );
                     pen += g.advance;
                     continue;
                 }
@@ -585,7 +612,14 @@ impl Canvas<'_> {
         let r = (6.0 * scale).round() as i32;
         let bord = scale.round().max(1.0) as i32;
         self.fill_round_rect(bx, by, bw, bh, r, border);
-        self.fill_round_rect(bx + bord, by + bord, bw - 2 * bord, bh - 2 * bord, (r - bord).max(0), bg);
+        self.fill_round_rect(
+            bx + bord,
+            by + bord,
+            bw - 2 * bord,
+            bh - 2 * bord,
+            (r - bord).max(0),
+            bg,
+        );
 
         if style.think {
             // A descending trail of shrinking, separated bubbles.
@@ -646,7 +680,12 @@ mod tests {
             0,
             1,
             false,
-            &BalloonPaint { bg: [255, 255, 225], border: [0, 0, 0], text: [0, 0, 0], think: false },
+            &BalloonPaint {
+                bg: [255, 255, 225],
+                border: [0, 0, 0],
+                text: [0, 0, 0],
+                think: false,
+            },
             None,
             2.0,
         );
@@ -664,12 +703,26 @@ mod tests {
             4,
             1,
             false,
-            &BalloonPaint { bg: [255, 255, 225], border: [0, 0, 0], text: [0, 0, 0], think: false },
+            &BalloonPaint {
+                bg: [255, 255, 225],
+                border: [0, 0, 0],
+                text: [0, 0, 0],
+                think: false,
+            },
             None,
             2.0,
         );
-        let partial = img.rgba.iter().skip(3).step_by(4).filter(|&&a| a > 0 && a < 255).count();
-        assert!(partial > 0, "shape edges should be antialiased (have partial-alpha pixels)");
+        let partial = img
+            .rgba
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .filter(|&&a| a > 0 && a < 255)
+            .count();
+        assert!(
+            partial > 0,
+            "shape edges should be antialiased (have partial-alpha pixels)"
+        );
     }
 
     #[test]
@@ -677,6 +730,9 @@ mod tests {
         let lines = ["Hmm".to_string()];
         let speak = balloon_size(None, &lines, 0, 1, 2.0, false);
         let think = balloon_size(None, &lines, 0, 1, 2.0, true);
-        assert!(think.1 > speak.1, "thought tail is taller: {think:?} vs {speak:?}");
+        assert!(
+            think.1 > speak.1,
+            "thought tail is taller: {think:?} vs {speak:?}"
+        );
     }
 }

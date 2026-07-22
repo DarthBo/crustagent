@@ -21,7 +21,10 @@ fn teleporter() -> Agent {
         sound_ndx: -1,
         exit_frame: -1,
         branching: Vec::new(),
-        images: vec![FrameImage { image_ndx: 0, offset: (0, 0) }],
+        images: vec![FrameImage {
+            image_ndx: 0,
+            offset: (0, 0),
+        }],
         overlays: Vec::new(),
     };
     let anim = |name: &str, dur: u16| Animation {
@@ -33,9 +36,18 @@ fn teleporter() -> Agent {
     let animations = vec![anim("Show", 20), anim("Hide", 20), anim("Idle", 100)];
     let gesture_names: Vec<String> = animations.iter().map(|a| a.name.clone()).collect();
     let states = vec![
-        State { name: "SHOWING".into(), animations: vec!["Show".into()] },
-        State { name: "HIDING".into(), animations: vec!["Hide".into()] },
-        State { name: "IDLINGLEVEL1".into(), animations: vec!["Idle".into()] },
+        State {
+            name: "SHOWING".into(),
+            animations: vec!["Show".into()],
+        },
+        State {
+            name: "HIDING".into(),
+            animations: vec!["Hide".into()],
+        },
+        State {
+            name: "IDLINGLEVEL1".into(),
+            animations: vec!["Idle".into()],
+        },
         // deliberately no MOVINGLEFT/RIGHT/UP/DOWN
     ];
     let header = FileHeader {
@@ -53,9 +65,21 @@ fn teleporter() -> Agent {
         desc1: String::new(),
         desc2: String::new(),
     }];
-    let images = vec![Rgba { width: 1, height: 1, pixels: vec![0, 0, 0, 0] }];
+    let images = vec![Rgba {
+        width: 1,
+        height: 1,
+        pixels: vec![0, 0, 0, 0],
+    }];
     Agent::from_file(AcsFile::from_parts_rgba(
-        header, None, None, names, states, gesture_names, animations, images, Vec::new(),
+        header,
+        None,
+        None,
+        names,
+        states,
+        gesture_names,
+        animations,
+        images,
+        Vec::new(),
     ))
 }
 
@@ -95,7 +119,10 @@ fn show_speak_move_hide() {
     assert!(b0.shown_words >= 1);
     run(&mut agent, 700); // ~2 more words paced in
     let b1 = agent.balloon().expect("still speaking");
-    assert!(b1.shown_words > b0.shown_words, "words should reveal over time");
+    assert!(
+        b1.shown_words > b0.shown_words,
+        "words should reveal over time"
+    );
     // After the phrase finishes speaking, the balloon lingers (auto-hide) fully revealed,
     // then clears — while the character resumes idling.
     run(&mut agent, 2000);
@@ -146,7 +173,10 @@ fn play_looping_holds_until_stopped() {
     // have returned to idle by now.
     agent.play_looping("Greet");
     run(&mut agent, 6000);
-    assert!(agent.is_gesturing(), "looping gesture should still be playing");
+    assert!(
+        agent.is_gesturing(),
+        "looping gesture should still be playing"
+    );
 
     // stop() ends the loop; the agent falls back to idling while visible.
     agent.stop();
@@ -192,7 +222,10 @@ fn say_over_reveals_while_gesturing() {
     run(&mut agent, 1200);
     let b2 = agent.balloon().expect("still revealing");
     assert!(b2.shown_words > b.shown_words, "overlay reveals over time");
-    assert!(agent.is_gesturing(), "still gesturing after the overlay reveal");
+    assert!(
+        agent.is_gesturing(),
+        "still gesturing after the overlay reveal"
+    );
 }
 
 #[test]
@@ -207,10 +240,18 @@ fn move_without_a_walk_animation_teleports() {
     // Still vanishing (HIDING is ~200ms) — a glide at 300px/s would already have crept
     // forward by now, but a teleport holds the start position until the jump.
     run(&mut agent, 60);
-    assert_eq!(agent.position(), (0, 0), "teleport holds position while vanishing (no glide)");
+    assert_eq!(
+        agent.position(),
+        (0, 0),
+        "teleport holds position while vanishing (no glide)"
+    );
 
     run(&mut agent, 3000); // HIDING → jump → SHOWING completes
-    assert_eq!(agent.position(), (300, 200), "teleport lands exactly on the destination");
+    assert_eq!(
+        agent.position(),
+        (300, 200),
+        "teleport lands exactly on the destination"
+    );
 }
 
 #[test]
@@ -226,9 +267,15 @@ fn play_looping_honors_the_built_in_loop_point() {
         exit_frame: -1,
         branching: branch
             .iter()
-            .map(|&(frame_ndx, probability)| Branch { frame_ndx, probability })
+            .map(|&(frame_ndx, probability)| Branch {
+                frame_ndx,
+                probability,
+            })
             .collect(),
-        images: vec![FrameImage { image_ndx: img, offset: (0, 0) }],
+        images: vec![FrameImage {
+            image_ndx: img,
+            offset: (0, 0),
+        }],
         overlays: Vec::new(),
     };
     let loop_anim = Animation {
@@ -247,14 +294,26 @@ fn play_looping_honors_the_built_in_loop_point() {
         palette: Vec::new(),
     };
     let images = (0..3)
-        .map(|_| Rgba { width: 1, height: 1, pixels: vec![0, 0, 0, 0] })
+        .map(|_| Rgba {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 0],
+        })
         .collect();
     let mut agent = Agent::from_file(AcsFile::from_parts_rgba(
         header,
         None,
         None,
-        vec![Name { language: 0x0409, name: "Loop".into(), desc1: String::new(), desc2: String::new() }],
-        vec![State { name: "IDLINGLEVEL1".into(), animations: vec!["Loop".into()] }],
+        vec![Name {
+            language: 0x0409,
+            name: "Loop".into(),
+            desc1: String::new(),
+            desc2: String::new(),
+        }],
+        vec![State {
+            name: "IDLINGLEVEL1".into(),
+            animations: vec!["Loop".into()],
+        }],
         vec!["Loop".into()],
         vec![loop_anim],
         images,
@@ -289,7 +348,10 @@ fn wait_holds_the_current_frame_instead_of_replaying() {
         sound_ndx: -1,
         exit_frame: -1,
         branching: Vec::new(),
-        images: vec![FrameImage { image_ndx: img, offset: (0, 0) }],
+        images: vec![FrameImage {
+            image_ndx: img,
+            offset: (0, 0),
+        }],
         overlays: Vec::new(),
     };
     let wag = Animation {
@@ -308,14 +370,26 @@ fn wait_holds_the_current_frame_instead_of_replaying() {
         palette: Vec::new(),
     };
     let images = (0..3)
-        .map(|_| Rgba { width: 1, height: 1, pixels: vec![0, 0, 0, 0] })
+        .map(|_| Rgba {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 0],
+        })
         .collect();
     let mut agent = Agent::from_file(AcsFile::from_parts_rgba(
         header,
         None,
         None,
-        vec![Name { language: 0x0409, name: "Wag".into(), desc1: String::new(), desc2: String::new() }],
-        vec![State { name: "IDLINGLEVEL1".into(), animations: vec!["Wag".into()] }],
+        vec![Name {
+            language: 0x0409,
+            name: "Wag".into(),
+            desc1: String::new(),
+            desc2: String::new(),
+        }],
+        vec![State {
+            name: "IDLINGLEVEL1".into(),
+            animations: vec!["Wag".into()],
+        }],
         vec!["Wag".into()],
         vec![wag],
         images,
@@ -338,7 +412,10 @@ fn wait_holds_the_current_frame_instead_of_replaying() {
             break;
         }
     }
-    assert!(!changed, "frame changed during the wait — it replayed instead of holding");
+    assert!(
+        !changed,
+        "frame changed during the wait — it replayed instead of holding"
+    );
 }
 
 #[test]
@@ -347,12 +424,17 @@ fn fires_embedded_sound_effects() {
 
     // Find an animation whose *first* frame carries a sound (deterministic: frame 0 always
     // plays), so we can assert the sink is driven.
-    let anim = agent.file().animations.iter().enumerate().find_map(|(i, a)| {
-        a.frames
-            .first()
-            .is_some_and(|f| f.sound_ndx >= 0)
-            .then(|| agent.file().gesture_names[i].clone())
-    });
+    let anim = agent
+        .file()
+        .animations
+        .iter()
+        .enumerate()
+        .find_map(|(i, a)| {
+            a.frames
+                .first()
+                .is_some_and(|f| f.sound_ndx >= 0)
+                .then(|| agent.file().gesture_names[i].clone())
+        });
     let Some(anim) = anim else {
         eprintln!("no frame-0 sound animation in Merlin — skipping");
         return;
