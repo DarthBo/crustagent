@@ -54,6 +54,9 @@ pub enum Request {
     Hide { fast: bool },
     /// Play a named gesture (its full base + `…Continued` + `…Return`).
     Play(String),
+    /// Play a named gesture on a loop until [`Agent::stop`] or the next queued request —
+    /// for holding a pose or sustaining a gesture rather than playing it once.
+    PlayLoop(String),
     /// Speak: show a balloon, pace the words, and drive the TTS engine + mouth.
     Speak(String),
     /// Think: show a thought balloon (no audio), pacing the words silently.
@@ -274,6 +277,11 @@ pub struct Agent {
     balloon_kind: Option<BalloonKind>,
     balloon_done: bool,
     balloon_hold_ms: u32,
+    /// A `say_over`/`think_over` balloon revealing *in parallel* with the current animation
+    /// (rather than occupying the queue as a `Speak`/`Think` activity would).
+    speaking_overlay: bool,
+    /// Whether the active overlay balloon is a silent think (vs a spoken say).
+    overlay_think: bool,
 
     // sound effects
     audio: Box<dyn AudioSink>,
@@ -322,6 +330,8 @@ impl Agent {
             balloon_kind: None,
             balloon_done: false,
             balloon_hold_ms: 0,
+            speaking_overlay: false,
+            overlay_think: false,
             audio: Box::new(NullSink),
             last_track_index: None,
         }
@@ -457,8 +467,45 @@ impl Agent {
     pub fn play(&mut self, animation: impl Into<String>) -> ReqId {
         self.request(Request::Play(animation.into()))
     }
+    /// Queue a gesture that **loops** until [`stop`](Agent::stop) or the next queued request
+    /// preempts it — for holding a pose or sustaining a gesture, rather than the single
+    /// one-shot of [`play`](Agent::play).
+    pub fn play_looping(&mut self, animation: impl Into<String>) -> ReqId {
+        self.request(Request::PlayLoop(animation.into()))
+    }
     pub fn speak(&mut self, text: impl Into<String>) -> ReqId {
         self.request(Request::Speak(text.into()))
+    }
+    /// Show a speech balloon that reveals **over the current animation**, without taking a
+    /// queue slot — so the character keeps whatever gesture is playing (e.g. a looping
+    /// [`play_looping`](Agent::play_looping) pose) while it talks. Fire-and-forget: it
+    /// replaces any current balloon and auto-hides per the character's style. Use plain
+    /// [`speak`](Agent::speak) when you want the serial, mouth-driven `SPEAKING` behaviour.
+    pub fn say_over(&mut self, text: impl Into<String>) {
+        self.begin_overlay_speech(text.into(), false);
+    }
+    /// Like [`say_over`](Agent::say_over) but a silent thought balloon.
+    pub fn think_over(&mut self, text: impl Into<String>) {
+        self.begin_overlay_speech(text.into(), true);
+    }
+
+    /// Start a parallel balloon (see [`say_over`]/[`think_over`]): set up the balloon + a
+    /// speech/think timer without queuing or changing the activity.
+    fn begin_overlay_speech(&mut self, text: String, think: bool) {
+        let parsed = parse_speech(&text);
+        let spoken = parsed.spoken_text();
+        self.speak_mouth = None;
+        let kind = if think { BalloonKind::Think } else { BalloonKind::Speak };
+        self.begin_balloon(kind, parsed.display_words, parsed.bookmark_at);
+        let words = self.speak_words.len().max(1);
+        if think {
+            self.think_timer.speak("", words);
+        } else {
+            self.tts.speak(&spoken, words);
+            self.emit(Event::SpeechStarted);
+        }
+        self.overlay_think = think;
+        self.speaking_overlay = true;
     }
     /// Show a thought balloon (no audio), pacing the words silently.
     pub fn think(&mut self, text: impl Into<String>) -> ReqId {
@@ -479,6 +526,12 @@ impl Agent {
         let cancelled: Vec<ReqId> = self.queue.drain(..).map(|(id, _)| id).collect();
         for id in cancelled {
             self.emit(Event::RequestCompleted(id));
+        }
+        // End a looping gesture too — otherwise it never finishes and would block the queue
+        // forever. Mark it done so the next update advances to the queue (or to idle).
+        if self.track_loops && self.activity == Activity::Gesture {
+            self.track_loops = false;
+            self.track_elapsed_ms = self.track_total_ms;
         }
     }
 
@@ -505,6 +558,7 @@ impl Agent {
     }
 
     fn clear_balloon(&mut self) {
+        self.speaking_overlay = false; // stop any parallel reveal
         if self.balloon_kind.take().is_some() {
             self.balloon_done = false;
             self.balloon_hold_ms = 0;
@@ -520,12 +574,13 @@ impl Agent {
             return; // frozen: animation, speech reveal, and the balloon all hold
         }
 
-        // Idle/hidden yields immediately to any queued request.
+        // Idle/hidden — and a looping gesture, which otherwise never ends — yield
+        // immediately to any queued request.
         if !self.queue.is_empty()
-            && matches!(
+            && (matches!(
                 self.activity,
                 Activity::Idle | Activity::IdleRest | Activity::Hidden
-            )
+            ) || (self.activity == Activity::Gesture && self.track_loops))
         {
             self.next();
         }
@@ -554,8 +609,16 @@ impl Agent {
                     }
                 }
             }
-            Activity::Speak => self.advance_speech(dt_ms, false),
-            Activity::Think => self.advance_speech(dt_ms, true),
+            Activity::Speak => {
+                if self.poll_speech(dt_ms, false) {
+                    self.next();
+                }
+            }
+            Activity::Think => {
+                if self.poll_speech(dt_ms, true) {
+                    self.next();
+                }
+            }
             Activity::Wait | Activity::IdleRest => {
                 if self.track_elapsed_ms >= self.track_total_ms {
                     self.next();
@@ -571,6 +634,15 @@ impl Agent {
             }
         }
 
+        // A parallel `say_over`/`think_over` balloon reveals alongside the animation above
+        // (never while a serial Speak/Think activity is already driving the reveal).
+        if self.speaking_overlay
+            && !matches!(self.activity, Activity::Speak | Activity::Think)
+            && self.poll_speech(dt_ms, self.overlay_think)
+        {
+            self.speaking_overlay = false;
+        }
+
         // Auto-hide the balloon a few seconds after its content finished revealing.
         self.tick_balloon(dt_ms);
 
@@ -580,8 +652,10 @@ impl Agent {
         }
     }
 
-    /// Poll the active speech/think engine, reveal words, fire bookmarks, and finish.
-    fn advance_speech(&mut self, dt_ms: u32, think: bool) {
+    /// Poll the active speech/think engine, reveal words, and fire bookmarks. Returns `true`
+    /// the tick speech finishes (the caller decides what to do next: a serial Speak/Think
+    /// activity advances the queue; a parallel overlay just stops revealing).
+    fn poll_speech(&mut self, dt_ms: u32, think: bool) -> bool {
         let events = if think {
             self.think_timer.poll(dt_ms)
         } else {
@@ -613,8 +687,8 @@ impl Agent {
             if !think {
                 self.emit(Event::SpeechEnded);
             }
-            self.next();
         }
+        done
     }
 
     /// Raise any pending bookmarks whose word position the reveal has now passed.
@@ -712,6 +786,19 @@ impl Agent {
             Request::Play(name) => {
                 let frames = self.build_gesture_frames(&name, false);
                 self.install_track(frames, false);
+                self.activity = Activity::Gesture;
+            }
+            Request::PlayLoop(name) => {
+                // Forward walk only (no exit branch) so the cycle repeats cleanly; loops
+                // until stop() or the next queued request preempts it.
+                let indices: Vec<usize> = {
+                    let ch = Character::new(&self.file);
+                    ch.full_gesture(&name)
+                        .iter()
+                        .filter_map(|a| self.anim_index(&a.name))
+                        .collect()
+                };
+                self.build_track(&indices, true);
                 self.activity = Activity::Gesture;
             }
             Request::GestureAt { x, y } => {

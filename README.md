@@ -65,9 +65,14 @@ loop {
 }
 ```
 
-The `Agent` runs a serial action queue (`show`/`hide`/`play`/`speak`/`think`/`move_to`/
-`gesture_at`/`wait`), auto-idles when the queue drains, and hands back a composited RGBA
-frame + balloon + position each tick — windowing- and audio-agnostic. Every request returns
+The `Agent` runs a serial action queue (`show`/`hide`/`play`/`play_looping`/`speak`/`think`/
+`move_to`/`gesture_at`/`wait`), auto-idles when the queue drains, and hands back a composited
+RGBA frame + balloon + position each tick — windowing- and audio-agnostic. `play` runs a
+gesture once; **`play_looping`** holds it on a loop — sustaining a pose or gesture until
+`stop()` or the next queued request preempts it. Speech is normally serial (`speak`
+drives the character's `SPEAKING` animation + mouth), but **`say_over`/`think_over`** show a
+balloon that reveals *over the current animation* without taking a queue slot — so the
+character can talk while it keeps gesturing. Every request returns
 a `ReqId`, and `drain_events()` yields an `Event` stream (request start/complete, show/hide,
 idle start/end, balloon show/hide, speech start/word/end, `\Mrk` **bookmarks**, plus
 host-reported clicks/drags) so an app can react to what the character is doing. Speech

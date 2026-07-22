@@ -88,6 +88,65 @@ fn gesture_and_stop() {
 }
 
 #[test]
+fn play_looping_holds_until_stopped() {
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 3000);
+
+    // A looping gesture keeps playing well past a single cycle — a one-shot `play` would
+    // have returned to idle by now.
+    agent.play_looping("Greet");
+    run(&mut agent, 6000);
+    assert!(agent.is_gesturing(), "looping gesture should still be playing");
+
+    // stop() ends the loop; the agent falls back to idling while visible.
+    agent.stop();
+    run(&mut agent, 3000);
+    assert!(!agent.is_gesturing(), "stop() should end the loop");
+    assert!(agent.is_visible());
+}
+
+#[test]
+fn play_looping_yields_to_the_next_request() {
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 3000);
+
+    agent.play_looping("Greet");
+    run(&mut agent, 1000);
+    assert!(agent.is_gesturing());
+
+    // Queuing another request preempts the loop rather than being blocked behind it forever.
+    agent.set_position(0, 0);
+    agent.move_to(300, 200, 300);
+    run(&mut agent, 5000);
+    assert_eq!(agent.position(), (300, 200), "the queued move ran");
+}
+
+#[test]
+fn say_over_reveals_while_gesturing() {
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 3000);
+
+    agent.play_looping("Greet");
+    run(&mut agent, 200);
+    assert!(agent.is_gesturing());
+
+    // Talk *over* the running gesture: the balloon reveals and the gesture keeps playing.
+    agent.say_over("one two three four");
+    agent.update(16);
+    let b = agent.balloon().expect("overlay balloon while gesturing");
+    assert!(b.shown_words >= 1);
+    assert!(agent.is_gesturing(), "gesture continues during say_over");
+
+    run(&mut agent, 1200);
+    let b2 = agent.balloon().expect("still revealing");
+    assert!(b2.shown_words > b.shown_words, "overlay reveals over time");
+    assert!(agent.is_gesturing(), "still gesturing after the overlay reveal");
+}
+
+#[test]
 fn fires_embedded_sound_effects() {
     let Some(mut agent) = merlin() else { return };
 
