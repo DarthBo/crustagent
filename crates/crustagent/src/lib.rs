@@ -806,7 +806,26 @@ impl Agent {
                         .filter_map(|a| self.anim_index(&a.name))
                         .collect()
                 };
-                self.build_track(&indices, true);
+                if let [idx] = indices[..] {
+                    // Single animation: honor its own loop point (e.g. Merlin's Processing
+                    // has a ~720ms intro, then loops) — play the intro once, then repeat only
+                    // the looping body, instead of restarting the whole clip each cycle.
+                    let (track, loop_start_ms) = {
+                        let anim = &self.file.animations[idx];
+                        let seq = sequence_animation(anim, &mut self.rng);
+                        let track: Vec<TrackFrame> = seq
+                            .frames
+                            .iter()
+                            .map(|e| TrackFrame { anim: idx, frame: e.frame, dur_ms: (e.duration_cs as u32 * 10).max(1) })
+                            .collect();
+                        (track, seq.loop_start_cs.map(|cs| cs * 10))
+                    };
+                    self.install_track(track, true);
+                    self.track_loop_start_ms = loop_start_ms.unwrap_or(0);
+                } else {
+                    // Multi-part gesture: loop the whole concatenated forward track.
+                    self.build_track(&indices, true);
+                }
                 self.activity = Activity::Gesture;
             }
             Request::GestureAt { x, y } => {

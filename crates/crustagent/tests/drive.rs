@@ -214,6 +214,71 @@ fn move_without_a_walk_animation_teleports() {
 }
 
 #[test]
+fn play_looping_honors_the_built_in_loop_point() {
+    use crustagent::format::{
+        AcsFile, Animation, Branch, FileHeader, Frame, FrameImage, Guid, Name, ReturnKind, Rgba,
+        State,
+    };
+    // Animation "Loop": frame 0 is a one-time intro; frames 1-2 are the loop (frame 2 -> 1).
+    let f = |img: u32, branch: &[(i16, u16)]| Frame {
+        duration: 10,
+        sound_ndx: -1,
+        exit_frame: -1,
+        branching: branch
+            .iter()
+            .map(|&(frame_ndx, probability)| Branch { frame_ndx, probability })
+            .collect(),
+        images: vec![FrameImage { image_ndx: img, offset: (0, 0) }],
+        overlays: Vec::new(),
+    };
+    let loop_anim = Animation {
+        name: "Loop".into(),
+        return_kind: ReturnKind::None,
+        return_name: String::new(),
+        frames: vec![f(0, &[]), f(1, &[]), f(2, &[(1, 100)])],
+    };
+    let header = FileHeader {
+        version_major: 2,
+        version_minor: 0,
+        guid: Guid([0; 16]),
+        image_size: (1, 1),
+        transparency: 0,
+        style: 0,
+        palette: Vec::new(),
+    };
+    let images = (0..3)
+        .map(|_| Rgba { width: 1, height: 1, pixels: vec![0, 0, 0, 0] })
+        .collect();
+    let mut agent = Agent::from_file(AcsFile::from_parts_rgba(
+        header,
+        None,
+        None,
+        vec![Name { language: 0x0409, name: "Loop".into(), desc1: String::new(), desc2: String::new() }],
+        vec![State { name: "IDLINGLEVEL1".into(), animations: vec!["Loop".into()] }],
+        vec!["Loop".into()],
+        vec![loop_anim],
+        images,
+        Vec::new(),
+    ));
+    agent.show_fast();
+    agent.update(16);
+    agent.play_looping("Loop");
+
+    // The intro frame (0) lasts 100ms; run past one full pass, then confirm the body keeps
+    // cycling and the intro never replays.
+    run(&mut agent, 400);
+    let mut saw_body = false;
+    for _ in 0..40 {
+        run(&mut agent, 16);
+        if let Some((_, frame, _)) = agent.current_frame_token() {
+            assert_ne!(frame, 0, "intro frame replayed — loop point not honored");
+            saw_body |= frame == 1 || frame == 2;
+        }
+    }
+    assert!(saw_body, "the loop body should be cycling");
+}
+
+#[test]
 fn fires_embedded_sound_effects() {
     let Some(mut agent) = merlin() else { return };
 
