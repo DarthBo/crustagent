@@ -4,9 +4,11 @@
 //! [`crustagent_core::BalloonLayout`] / `crustagent::BalloonView`. Given the already-wrapped
 //! lines, colors, and a speech-vs-think flag, it paints a rounded balloon (pointed speech
 //! tail or a trail of thought bubbles) — with antialiased edges and anti-aliased TrueType
-//! text (via `fontdue`, face discovered by `fontdb`) — into a top-down RGBA8 buffer. No
-//! windowing, no GPU — the caller blits/uploads the buffer. Paint at the display's scale
-//! for crisp results: the shape is antialiased at whatever resolution you render.
+//! text (via `fontdue`, face discovered by `fontdb`) — into a top-down RGBA8 buffer. Colour
+//! emoji render from the system emoji face for any codepoint the text face lacks (via
+//! `swash`, so COLR / CBDT / sbix all work). No windowing, no GPU — the caller blits/uploads
+//! the buffer. Paint at the display's scale for crisp results: the shape is antialiased at
+//! whatever resolution you render.
 //!
 //! Two entry points:
 //! - [`paint_balloon`] sizes a fresh buffer to the text and returns a [`BalloonImage`].
@@ -28,6 +30,10 @@
 //! ```
 
 use font8x8::legacy::BASIC_LEGACY;
+use swash::scale::image::Content;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::zeno::Format;
+use swash::FontRef;
 
 /// Bitmap-font scale for the no-TrueType fallback path.
 const BSCALE: i32 = 2;
@@ -36,13 +42,29 @@ const TAIL_LEN: i32 = 9;
 /// Thought-balloon bubble radii (at scale 1.0), largest nearest the body.
 const THINK_BUBBLES: [f32; 3] = [4.5, 3.0, 2.0];
 
-/// A real, anti-aliased text font: a system TrueType face rasterized at a pixel size.
+/// A real, anti-aliased text font: a system TrueType face rasterized at a pixel size, with
+/// an optional colour-emoji face for codepoints the text face lacks (rendered via swash, so
+/// COLR / CBDT / sbix all work). The `fontdb` database is kept alive so the (possibly large,
+/// e.g. Apple Color Emoji) emoji face can be memory-mapped on demand rather than copied.
 pub struct Font {
     face: fontdue::Font,
     px: f32,
     ascent: f32,
     line_h: f32,
     avg_advance: i32,
+    db: fontdb::Database,
+    emoji: Option<fontdb::ID>,
+}
+
+/// A rasterized colour-emoji glyph: straight-alpha RGBA plus its placement (offsets from the
+/// pen position / baseline) and pen advance, all in pixels.
+struct EmojiGlyph {
+    left: i32,
+    top: i32,
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+    advance: f32,
 }
 
 impl Font {
@@ -95,7 +117,20 @@ impl Font {
             .or_else(|| db.faces().next().map(|f| f.id))?;
 
         let (data, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
-        Font::from_bytes(&data, index, px)
+        let mut font = Font::from_bytes(&data, index, px)?;
+        // Colour-emoji fallback: the first installed system emoji family (names differ per
+        // platform — Apple Color Emoji / Segoe UI Emoji / Noto Color Emoji). swash reads
+        // whichever colour-glyph format the face uses (sbix / COLR / CBDT).
+        font.emoji = ["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla"]
+            .iter()
+            .find_map(|n| {
+                db.query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(n)],
+                    ..Default::default()
+                })
+            });
+        font.db = db;
+        Some(font)
     }
 
     /// Parse `data` (TTF/OTF, `index` selects a face in a collection) at `px` pixels.
@@ -120,6 +155,8 @@ impl Font {
             ascent,
             line_h,
             avg_advance,
+            db: fontdb::Database::new(),
+            emoji: None,
         })
     }
 
@@ -133,12 +170,71 @@ impl Font {
         self.avg_advance
     }
 
-    /// Pixel advance width of `s`.
+    /// Pixel advance width of `s`, counting emoji at their colour-face advance.
     pub fn measure(&self, s: &str) -> i32 {
-        s.chars()
-            .map(|c| self.face.metrics(c, self.px).advance_width)
-            .sum::<f32>()
-            .ceil() as i32
+        s.chars().map(|c| self.advance_of(c)).sum::<f32>().ceil() as i32
+    }
+
+    /// Whether the text face has a real glyph for `c` (index 0 = missing → try emoji).
+    fn has_text_glyph(&self, c: char) -> bool {
+        self.face.lookup_glyph_index(c) != 0
+    }
+
+    /// Advance of one char: the text face's, or — for codepoints it lacks — the emoji
+    /// face's, falling back to the text face's notdef advance if neither has the glyph.
+    fn advance_of(&self, c: char) -> f32 {
+        if self.has_text_glyph(c) {
+            return self.face.metrics(c, self.px).advance_width;
+        }
+        if let Some(id) = self.emoji {
+            let adv = self
+                .db
+                .with_face_data(id, |data, index| {
+                    let font = FontRef::from_index(data, index as usize)?;
+                    let gid = font.charmap().map(c);
+                    (gid != 0).then(|| font.glyph_metrics(&[]).scale(self.px).advance_width(gid))
+                })
+                .flatten();
+            if let Some(adv) = adv {
+                return adv;
+            }
+        }
+        self.face.metrics(c, self.px).advance_width
+    }
+
+    /// Rasterize a colour-emoji glyph for `c`, or `None` if there's no emoji face / glyph.
+    /// The emoji face is memory-mapped on demand (never copied — Apple Color Emoji is huge).
+    fn render_emoji(&self, c: char) -> Option<EmojiGlyph> {
+        let id = self.emoji?;
+        self.db
+            .with_face_data(id, |data, index| {
+                let font = FontRef::from_index(data, index as usize)?;
+                let gid = font.charmap().map(c);
+                if gid == 0 {
+                    return None;
+                }
+                let mut cx = ScaleContext::new();
+                let mut scaler = cx.builder(font).size(self.px).hint(false).build();
+                let img = Render::new(&[
+                    Source::ColorBitmap(StrikeWith::BestFit),
+                    Source::ColorOutline(0),
+                ])
+                .format(Format::Alpha)
+                .render(&mut scaler, gid)?;
+                if !matches!(img.content, Content::Color) {
+                    return None;
+                }
+                let advance = font.glyph_metrics(&[]).scale(self.px).advance_width(gid);
+                Some(EmojiGlyph {
+                    left: img.placement.left,
+                    top: img.placement.top,
+                    width: img.placement.width as usize,
+                    height: img.placement.height as usize,
+                    rgba: img.data,
+                    advance,
+                })
+            })
+            .flatten()
     }
 }
 
@@ -318,6 +414,24 @@ impl Canvas<'_> {
         self.buf[o + 3] = out_a as u8;
     }
 
+    /// Composite a straight-alpha RGBA image (a colour-emoji glyph) with its top-left at
+    /// (`x`, `y`), row-major `w`×`h`.
+    fn blit_rgba(&mut self, x: i32, y: i32, w: usize, h: usize, rgba: &[u8]) {
+        for row in 0..h {
+            for col in 0..w {
+                let i = (row * w + col) * 4;
+                let a = rgba[i + 3];
+                if a == 0 {
+                    continue;
+                }
+                // `cover` does straight-alpha "over" — reuse it per pixel with the glyph's
+                // own colour and coverage.
+                let rgb = [rgba[i], rgba[i + 1], rgba[i + 2]];
+                self.cover(x + col as i32, y + row as i32, rgb, a as f32 / 255.0);
+            }
+        }
+    }
+
     /// Fill the horizontal span [`left`, `right`) on row `y` with `rgb`, antialiasing the
     /// fractional ends.
     fn hspan(&mut self, y: i32, left: f32, right: f32, rgb: [u8; 3]) {
@@ -335,6 +449,15 @@ impl Canvas<'_> {
         let baseline = top + font.ascent.round() as i32;
         let mut pen = x as f32;
         for c in s.chars() {
+            // Colour emoji (and any codepoint the text face lacks) come from the emoji face,
+            // rasterized as RGBA and composited straight.
+            if !font.has_text_glyph(c) {
+                if let Some(g) = font.render_emoji(c) {
+                    self.blit_rgba(pen.round() as i32 + g.left, baseline - g.top, g.width, g.height, &g.rgba);
+                    pen += g.advance;
+                    continue;
+                }
+            }
             let (m, bitmap) = font.face.rasterize(c, font.px);
             let gx = pen.round() as i32 + m.xmin;
             let gy = baseline - m.height as i32 - m.ymin;
