@@ -857,10 +857,18 @@ impl Agent {
                 self.activity = Activity::Think;
             }
             Request::Wait(ms) => {
-                // freeze the current frame for `ms`
+                // Freeze the current frame for `ms`. Reduce the track to just that frame —
+                // otherwise the old (longer) track's timeline gets replayed from the start
+                // over `ms`, so a wait after a gesture looks like the gesture playing again.
+                let held = self
+                    .track_frame()
+                    .map(|f| TrackFrame { anim: f.anim, frame: f.frame, dur_ms: ms.max(1) });
+                self.track = held.into_iter().collect();
                 self.track_loops = false;
+                self.track_loop_start_ms = 0;
                 self.track_total_ms = ms.max(1);
                 self.track_elapsed_ms = 0;
+                self.last_track_index = None;
                 self.activity = Activity::Wait;
             }
         }

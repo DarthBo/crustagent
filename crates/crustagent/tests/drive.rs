@@ -279,6 +279,69 @@ fn play_looping_honors_the_built_in_loop_point() {
 }
 
 #[test]
+fn wait_holds_the_current_frame_instead_of_replaying() {
+    use crustagent::format::{
+        AcsFile, Animation, FileHeader, Frame, FrameImage, Guid, Name, ReturnKind, Rgba, State,
+    };
+    // A 3-frame gesture (no branch, no return).
+    let f = |img: u32| Frame {
+        duration: 10,
+        sound_ndx: -1,
+        exit_frame: -1,
+        branching: Vec::new(),
+        images: vec![FrameImage { image_ndx: img, offset: (0, 0) }],
+        overlays: Vec::new(),
+    };
+    let wag = Animation {
+        name: "Wag".into(),
+        return_kind: ReturnKind::None,
+        return_name: String::new(),
+        frames: vec![f(0), f(1), f(2)],
+    };
+    let header = FileHeader {
+        version_major: 2,
+        version_minor: 0,
+        guid: Guid([0; 16]),
+        image_size: (1, 1),
+        transparency: 0,
+        style: 0,
+        palette: Vec::new(),
+    };
+    let images = (0..3)
+        .map(|_| Rgba { width: 1, height: 1, pixels: vec![0, 0, 0, 0] })
+        .collect();
+    let mut agent = Agent::from_file(AcsFile::from_parts_rgba(
+        header,
+        None,
+        None,
+        vec![Name { language: 0x0409, name: "Wag".into(), desc1: String::new(), desc2: String::new() }],
+        vec![State { name: "IDLINGLEVEL1".into(), animations: vec!["Wag".into()] }],
+        vec!["Wag".into()],
+        vec![wag],
+        images,
+        Vec::new(),
+    ));
+    agent.show_fast();
+    agent.update(16);
+
+    // Play the 3-frame gesture (300ms), then a long wait. During the wait the frame must
+    // hold — the regression replayed the gesture's frames over the wait's timeline.
+    agent.play("Wag");
+    agent.wait(2000);
+    run(&mut agent, 400); // ~100ms into the wait (gesture is 300ms)
+    let held = agent.current_frame_token();
+    let mut changed = false;
+    for _ in 0..60 {
+        agent.update(16);
+        if agent.current_frame_token() != held {
+            changed = true;
+            break;
+        }
+    }
+    assert!(!changed, "frame changed during the wait — it replayed instead of holding");
+}
+
+#[test]
 fn fires_embedded_sound_effects() {
     let Some(mut agent) = merlin() else { return };
 
