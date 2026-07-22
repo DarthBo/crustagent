@@ -330,15 +330,6 @@ impl Canvas<'_> {
         }
     }
 
-    /// Draw a 1px-wide antialiased vertical edge of `rgb` on row `y`, centered on the
-    /// fractional x `xf` (the two straddling pixels share one pixel of coverage).
-    fn cover_edge(&mut self, y: i32, xf: f32, rgb: [u8; 3]) {
-        let x0 = xf.floor() as i32;
-        let frac = xf - x0 as f32;
-        self.cover(x0, y, rgb, 1.0 - frac);
-        self.cover(x0 + 1, y, rgb, frac);
-    }
-
     /// Draw `s` with a real font, its top edge at `top`, left edge at `x`.
     fn text_font(&mut self, font: &Font, x: i32, top: i32, s: &str, rgb: [u8; 3]) {
         let baseline = top + font.ascent.round() as i32;
@@ -417,8 +408,8 @@ impl Canvas<'_> {
         }
     }
 
-    /// An antialiased filled disc of radius `r` at `(cx, cy)` with a 1px border ring.
-    fn disc(&mut self, cx: i32, cy: i32, r: i32, fill: [u8; 3], border: [u8; 3]) {
+    /// An antialiased filled disc of radius `r` at `(cx, cy)` with a `bord`px border ring.
+    fn disc(&mut self, cx: i32, cy: i32, r: i32, bord: i32, fill: [u8; 3], border: [u8; 3]) {
         let rf = r as f32;
         for dy in -r - 1..=r + 1 {
             for dx in -r - 1..=r + 1 {
@@ -428,7 +419,7 @@ impl Canvas<'_> {
                     continue;
                 }
                 self.cover(cx + dx, cy + dy, border, outer);
-                let inner = (0.5 - (dist - (rf - 1.0).max(0.0))).clamp(0.0, 1.0);
+                let inner = (0.5 - (dist - (rf - bord as f32).max(0.0))).clamp(0.0, 1.0);
                 if inner > 0.0 {
                     self.cover(cx + dx, cy + dy, fill, inner);
                 }
@@ -464,11 +455,14 @@ impl Canvas<'_> {
         // Direction from the body edge toward the character (down if the balloon is above).
         let dir = if below { -1 } else { 1 };
 
-        // Rounded body: a border-colored rounded rect with a 1px-smaller bg rect inside,
-        // leaving a clean 1px rounded outline.
+        // Rounded body: a border-colored rounded rect with a smaller bg rect inside,
+        // leaving a rounded outline. The outline is `bord` px — scaled to ~1 logical px so
+        // it survives the compositor's fractional downscale instead of thinning to a faint
+        // sub-pixel line.
         let r = (6.0 * scale).round() as i32;
+        let bord = scale.round().max(1.0) as i32;
         self.fill_round_rect(bx, by, bw, bh, r, border);
-        self.fill_round_rect(bx + 1, by + 1, bw - 2, bh - 2, (r - 1).max(0), bg);
+        self.fill_round_rect(bx + bord, by + bord, bw - 2 * bord, bh - 2 * bord, (r - bord).max(0), bg);
 
         if style.think {
             // A descending trail of shrinking, separated bubbles.
@@ -478,23 +472,30 @@ impl Canvas<'_> {
             for &base in &THINK_BUBBLES {
                 let rr = (base * scale).round().max(1.0) as i32;
                 edge += dir * (gap + rr);
-                self.disc(tcx, edge, rr, bg, border);
+                self.disc(tcx, edge, rr, bord, bg, border);
                 edge += dir * rr;
             }
         } else {
-            // Pointed tail: a bg triangle that opens into the rounded body (no cap across
-            // the top, so it merges), its two slanted sides outlined. Antialiased via
-            // fractional row widths and edge coverage.
+            // Pointed tail: a border-colored triangle with a bg triangle inset `bord` px on
+            // each slanted side — so the outline matches the body's and it opens into the
+            // body (the inset is horizontal only, no cap across the top). Antialiased ends
+            // via fractional row widths.
             let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
             let cxf = tcx as f32 + 0.5;
             let len = tail_len.max(1) as f32;
-            for row in 0..=tail_len {
-                let half = tail_half as f32 * (1.0 - row as f32 / len);
+            // Start `bord` rows inside the body so the tail's bg reaches up through the
+            // body's bottom border band and the two interiors merge — otherwise a thick
+            // outline leaves a border line across the junction. Rows inside the body draw
+            // bg only (the body already painted the outline there).
+            for row in -bord..=tail_len {
+                let half = tail_half as f32 * (1.0 - row.max(0) as f32 / len);
                 let y = attach_y + dir * row;
-                self.hspan(y, cxf - half, cxf + half, bg);
-                if half >= 0.5 {
-                    self.cover_edge(y, cxf - half, border);
-                    self.cover_edge(y, cxf + half, border);
+                if row >= 0 {
+                    self.hspan(y, cxf - half, cxf + half, border);
+                }
+                let inner = half - bord as f32;
+                if inner > 0.0 {
+                    self.hspan(y, cxf - inner, cxf + inner, bg);
                 }
             }
         }
