@@ -266,6 +266,11 @@ pub struct Agent {
     /// putting on his glasses) plays that animation in place first — he can't prepare while
     /// flying — and only then zips to the destination.
     move_gliding: bool,
+    /// This move is a **teleport**: the character has no `MOVING*` animation, so instead of
+    /// walking/flying it vanishes with `HIDING`, jumps to the destination, and reappears with
+    /// `SHOWING`. `move_teleport_appearing` is the phase (false = vanishing, true = appearing).
+    move_teleport: bool,
+    move_teleport_appearing: bool,
     tts: Box<dyn TtsEngine>,
     think_timer: TimedTts,
     speak_words: Vec<String>,
@@ -321,6 +326,8 @@ impl Agent {
             movement: MoveTo::new((0, 0), (0, 0), 0),
             move_anim: None,
             move_gliding: false,
+            move_teleport: false,
+            move_teleport_appearing: false,
             tts: Box::new(TimedTts::new()),
             think_timer: TimedTts::new().with_pace(THINK_PACE_MS),
             speak_words: Vec::new(),
@@ -589,6 +596,7 @@ impl Agent {
 
         match self.activity {
             Activity::Hidden => {}
+            Activity::Move if self.move_teleport => self.advance_teleport(),
             Activity::Move => {
                 // A flight plays its in-place preparation (the finite animation) first, then
                 // zips; a walk glides from the start. Once gliding, the exit (landing) plays
@@ -897,14 +905,8 @@ impl Agent {
         /// dragging out (the preparation animation, played in place, is separate).
         const ZIP_MAX_MS: u32 = 500;
 
-        let idx = {
-            let ch = Character::new(&self.file);
-            ch.state_animations(state)
-                .into_iter()
-                .flatten()
-                .find_map(|n| self.anim_index(n))
-        };
-        match idx {
+        self.move_teleport = false;
+        match self.state_anim_index(state) {
             Some(i) => {
                 let (track, loop_start_ms) = {
                     let anim = &self.file.animations[i];
@@ -930,12 +932,56 @@ impl Agent {
                 }
             }
             None => {
-                self.build_rest_track();
-                self.track_loops = true;
-                self.move_gliding = true;
+                // No walk/fly animation → teleport: vanish (HIDING), jump, reappear (SHOWING).
+                self.move_teleport = true;
+                self.move_teleport_appearing = false;
+                self.move_gliding = false;
+                self.install_phase_track("HIDING");
             }
         }
         self.activity = Activity::Move;
+    }
+
+    /// Resolve the first existing animation of a `state`, if any.
+    fn state_anim_index(&self, state: &str) -> Option<usize> {
+        let ch = Character::new(&self.file);
+        ch.state_animations(state)
+            .into_iter()
+            .flatten()
+            .find_map(|n| self.anim_index(n))
+    }
+
+    /// Install a state's animation as a one-shot track (for a teleport phase). If the state
+    /// has no animation, install a zero-length rest track so the phase advances immediately.
+    fn install_phase_track(&mut self, state: &str) {
+        match self.state_anim_index(state) {
+            Some(i) => self.build_track(&[i], false),
+            None => {
+                self.build_rest_track();
+                self.track_total_ms = 1; // finish next tick — no animation for this phase
+            }
+        }
+    }
+
+    /// Drive a teleport (character with no `MOVING*` animation): play `HIDING` in place, then
+    /// on completion jump to the destination and play `SHOWING`, then finish the move.
+    fn advance_teleport(&mut self) {
+        if self.track_elapsed_ms < self.track_total_ms {
+            return; // the current phase's animation is still playing
+        }
+        if !self.move_teleport_appearing {
+            // Vanished — jump to the destination and reappear there.
+            self.move_teleport_appearing = true;
+            self.position = self.movement.dest();
+            let (x, y) = self.position;
+            self.emit(Event::Moved { x, y });
+            self.install_phase_track("SHOWING");
+            self.move_teleport = true; // install_* cleared move_gliding but not this
+        } else {
+            // Reappeared — the move is complete.
+            self.move_teleport = false;
+            self.next();
+        }
     }
 
     /// On arrival, play the moving animation's exit (the landing) once, then continue the

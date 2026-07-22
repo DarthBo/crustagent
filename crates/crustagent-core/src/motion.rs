@@ -96,6 +96,11 @@ impl MoveTo {
         Direction::toward(self.dest.0 - self.start.0, self.dest.1 - self.start.1)
     }
 
+    /// The destination point.
+    pub fn dest(&self) -> (i32, i32) {
+        self.dest
+    }
+
     /// The travel duration (ms).
     pub fn duration_ms(&self) -> u32 {
         self.duration_ms

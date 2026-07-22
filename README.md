@@ -69,7 +69,9 @@ The `Agent` runs a serial action queue (`show`/`hide`/`play`/`play_looping`/`spe
 `move_to`/`gesture_at`/`wait`), auto-idles when the queue drains, and hands back a composited
 RGBA frame + balloon + position each tick — windowing- and audio-agnostic. `play` runs a
 gesture once; **`play_looping`** holds it on a loop — sustaining a pose or gesture until
-`stop()` or the next queued request preempts it. Speech is normally serial (`speak`
+`stop()` or the next queued request preempts it. `move_to` walks or flies a character that
+has `MOVING*` animations, and **teleports** one that doesn't (vanish → jump → reappear via
+`HIDING`/`SHOWING`). Speech is normally serial (`speak`
 drives the character's `SPEAKING` animation + mouth), but **`say_over`/`think_over`** show a
 balloon that reveals *over the current animation* without taking a queue slot — so the
 character can talk while it keeps gesturing. Every request returns

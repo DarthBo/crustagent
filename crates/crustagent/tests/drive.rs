@@ -10,6 +10,55 @@ fn merlin() -> Option<Agent> {
     Agent::load(path).ok()
 }
 
+/// A minimal in-memory character with SHOWING/HIDING/idle animations but **no** `MOVING*`
+/// state — so a move has to teleport rather than walk.
+fn teleporter() -> Agent {
+    use crustagent::format::{
+        AcsFile, Animation, FileHeader, Frame, FrameImage, Guid, Name, ReturnKind, Rgba, State,
+    };
+    let frame = |dur: u16| Frame {
+        duration: dur,
+        sound_ndx: -1,
+        exit_frame: -1,
+        branching: Vec::new(),
+        images: vec![FrameImage { image_ndx: 0, offset: (0, 0) }],
+        overlays: Vec::new(),
+    };
+    let anim = |name: &str, dur: u16| Animation {
+        name: name.into(),
+        return_kind: ReturnKind::None,
+        return_name: String::new(),
+        frames: vec![frame(dur)],
+    };
+    let animations = vec![anim("Show", 20), anim("Hide", 20), anim("Idle", 100)];
+    let gesture_names: Vec<String> = animations.iter().map(|a| a.name.clone()).collect();
+    let states = vec![
+        State { name: "SHOWING".into(), animations: vec!["Show".into()] },
+        State { name: "HIDING".into(), animations: vec!["Hide".into()] },
+        State { name: "IDLINGLEVEL1".into(), animations: vec!["Idle".into()] },
+        // deliberately no MOVINGLEFT/RIGHT/UP/DOWN
+    ];
+    let header = FileHeader {
+        version_major: 2,
+        version_minor: 0,
+        guid: Guid([0; 16]),
+        image_size: (1, 1),
+        transparency: 0,
+        style: 0,
+        palette: Vec::new(),
+    };
+    let names = vec![Name {
+        language: 0x0409,
+        name: "Tele".into(),
+        desc1: String::new(),
+        desc2: String::new(),
+    }];
+    let images = vec![Rgba { width: 1, height: 1, pixels: vec![0, 0, 0, 0] }];
+    Agent::from_file(AcsFile::from_parts_rgba(
+        header, None, None, names, states, gesture_names, animations, images, Vec::new(),
+    ))
+}
+
 /// Advance the agent by `ms`, in 16ms steps.
 fn run(agent: &mut Agent, ms: u32) {
     let mut left = ms;
@@ -144,6 +193,24 @@ fn say_over_reveals_while_gesturing() {
     let b2 = agent.balloon().expect("still revealing");
     assert!(b2.shown_words > b.shown_words, "overlay reveals over time");
     assert!(agent.is_gesturing(), "still gesturing after the overlay reveal");
+}
+
+#[test]
+fn move_without_a_walk_animation_teleports() {
+    let mut agent = teleporter();
+    agent.show();
+    run(&mut agent, 3000);
+    agent.set_position(0, 0);
+    assert_eq!(agent.position(), (0, 0));
+
+    agent.move_to(300, 200, 300);
+    // Still vanishing (HIDING is ~200ms) — a glide at 300px/s would already have crept
+    // forward by now, but a teleport holds the start position until the jump.
+    run(&mut agent, 60);
+    assert_eq!(agent.position(), (0, 0), "teleport holds position while vanishing (no glide)");
+
+    run(&mut agent, 3000); // HIDING → jump → SHOWING completes
+    assert_eq!(agent.position(), (300, 200), "teleport lands exactly on the destination");
 }
 
 #[test]
