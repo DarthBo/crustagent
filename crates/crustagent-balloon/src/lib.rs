@@ -3,9 +3,10 @@
 //! Software rendering for Microsoft Agent **word balloons** — the pixels behind
 //! [`crustagent_core::BalloonLayout`] / `crustagent::BalloonView`. Given the already-wrapped
 //! lines, colors, and a speech-vs-think flag, it paints a rounded balloon (pointed speech
-//! tail or a trail of thought bubbles) with anti-aliased TrueType text (via `fontdue`, face
-//! discovered by `fontdb`) into a top-down RGBA8 buffer. No windowing, no GPU — the caller
-//! blits/uploads the buffer.
+//! tail or a trail of thought bubbles) — with antialiased edges and anti-aliased TrueType
+//! text (via `fontdue`, face discovered by `fontdb`) — into a top-down RGBA8 buffer. No
+//! windowing, no GPU — the caller blits/uploads the buffer. Paint at the display's scale
+//! for crisp results: the shape is antialiased at whatever resolution you render.
 //!
 //! Two entry points:
 //! - [`paint_balloon`] sizes a fresh buffer to the text and returns a [`BalloonImage`].
@@ -253,6 +254,17 @@ struct Canvas<'a> {
     h: i32,
 }
 
+/// Coverage (0..=1) of the pixel centered at (`px`, `py`) inside the rounded rectangle
+/// (`x`, `y`, `w`, `h`) with corner radius `r` — a signed-distance field sampled with a
+/// 1px antialiased edge (coverage 0.5 exactly on the boundary).
+fn round_rect_cov(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    let qx = (px - (x + hw)).abs() - (hw - r);
+    let qy = (py - (y + hh)).abs() - (hh - r);
+    let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
+    (0.5 - d).clamp(0.0, 1.0)
+}
+
 impl Canvas<'_> {
     #[inline]
     fn put(&mut self, x: i32, y: i32, rgb: [u8; 3]) {
@@ -278,6 +290,53 @@ impl Canvas<'_> {
             self.buf[o + k] = ((c as u16 * a as u16 + self.buf[o + k] as u16 * inv) / 255) as u8;
         }
         self.buf[o + 3] = self.buf[o + 3].max(a);
+    }
+
+    /// Composite `rgb` at `(x, y)` with straight-alpha coverage `cov` (0..=1) using an
+    /// "over" blend. Shape edges meet *transparent* pixels, so — unlike [`Self::blend`],
+    /// which assumes an opaque backdrop — they need real straight-alpha compositing or the
+    /// antialiased edge picks up a dark fringe.
+    fn cover(&mut self, x: i32, y: i32, rgb: [u8; 3], cov: f32) {
+        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return;
+        }
+        let sa = (cov.clamp(0.0, 1.0) * 255.0).round() as u32;
+        if sa == 0 {
+            return;
+        }
+        let o = ((y * self.w + x) * 4) as usize;
+        let da = self.buf[o + 3] as u32;
+        let out_a = sa + da * (255 - sa) / 255;
+        if out_a == 0 {
+            return;
+        }
+        for k in 0..3 {
+            let s = rgb[k] as u32;
+            let d = self.buf[o + k] as u32;
+            self.buf[o + k] = ((s * sa + d * da * (255 - sa) / 255) / out_a).min(255) as u8;
+        }
+        self.buf[o + 3] = out_a as u8;
+    }
+
+    /// Fill the horizontal span [`left`, `right`) on row `y` with `rgb`, antialiasing the
+    /// fractional ends.
+    fn hspan(&mut self, y: i32, left: f32, right: f32, rgb: [u8; 3]) {
+        if right <= left {
+            return;
+        }
+        for x in left.floor() as i32..right.ceil() as i32 {
+            let cov = ((x as f32 + 1.0).min(right) - (x as f32).max(left)).clamp(0.0, 1.0);
+            self.cover(x, y, rgb, cov);
+        }
+    }
+
+    /// Draw a 1px-wide antialiased vertical edge of `rgb` on row `y`, centered on the
+    /// fractional x `xf` (the two straddling pixels share one pixel of coverage).
+    fn cover_edge(&mut self, y: i32, xf: f32, rgb: [u8; 3]) {
+        let x0 = xf.floor() as i32;
+        let frac = xf - x0 as f32;
+        self.cover(x0, y, rgb, 1.0 - frac);
+        self.cover(x0 + 1, y, rgb, frac);
     }
 
     /// Draw `s` with a real font, its top edge at `top`, left edge at `x`.
@@ -333,34 +392,45 @@ impl Canvas<'_> {
         }
     }
 
-    /// Fill a rectangle with rounded corners of radius `r`.
+    /// Fill a rectangle with antialiased rounded corners of radius `r`.
     fn fill_round_rect(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, rgb: [u8; 3]) {
         if w <= 0 || h <= 0 {
             return;
         }
-        let r = r.clamp(0, w.min(h) / 2);
-        for row in 0..h {
-            let inset = if r > 0 && row < r {
-                let dy = (r - row) as f32;
-                (r as f32 - ((r * r) as f32 - dy * dy).max(0.0).sqrt()).round() as i32
-            } else if r > 0 && row >= h - r {
-                let dy = (row - (h - 1 - r)) as f32;
-                (r as f32 - ((r * r) as f32 - dy * dy).max(0.0).sqrt()).round() as i32
-            } else {
-                0
-            };
-            self.fill_rect(x + inset, y + row, (w - 2 * inset).max(0), 1, rgb);
+        let r = r.clamp(0, w.min(h) / 2) as f32;
+        // Scan the box grown by 1px so the outer half of the AA edge is covered too.
+        for yy in y - 1..y + h + 1 {
+            for xx in x - 1..x + w + 1 {
+                let cov = round_rect_cov(
+                    xx as f32 + 0.5,
+                    yy as f32 + 0.5,
+                    x as f32,
+                    y as f32,
+                    w as f32,
+                    h as f32,
+                    r,
+                );
+                if cov > 0.0 {
+                    self.cover(xx, yy, rgb, cov);
+                }
+            }
         }
     }
 
-    /// A filled disc of radius `r` at `(cx, cy)` with a one-pixel border ring.
+    /// An antialiased filled disc of radius `r` at `(cx, cy)` with a 1px border ring.
     fn disc(&mut self, cx: i32, cy: i32, r: i32, fill: [u8; 3], border: [u8; 3]) {
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let d2 = dx * dx + dy * dy;
-                if d2 <= r * r {
-                    let c = if d2 >= (r - 1) * (r - 1) { border } else { fill };
-                    self.put(cx + dx, cy + dy, c);
+        let rf = r as f32;
+        for dy in -r - 1..=r + 1 {
+            for dx in -r - 1..=r + 1 {
+                let dist = ((dx * dx + dy * dy) as f32).sqrt();
+                let outer = (0.5 - (dist - rf)).clamp(0.0, 1.0);
+                if outer <= 0.0 {
+                    continue;
+                }
+                self.cover(cx + dx, cy + dy, border, outer);
+                let inner = (0.5 - (dist - (rf - 1.0).max(0.0))).clamp(0.0, 1.0);
+                if inner > 0.0 {
+                    self.cover(cx + dx, cy + dy, fill, inner);
                 }
             }
         }
@@ -412,15 +482,20 @@ impl Canvas<'_> {
                 edge += dir * rr;
             }
         } else {
-            // Pointed tail, filled from the attach edge so it opens into the rounded body;
-            // its two slanted sides are outlined.
+            // Pointed tail: a bg triangle that opens into the rounded body (no cap across
+            // the top, so it merges), its two slanted sides outlined. Antialiased via
+            // fractional row widths and edge coverage.
             let tcx = tip_x.clamp(bx + tail_half + 3, bx + bw - tail_half - 3);
+            let cxf = tcx as f32 + 0.5;
+            let len = tail_len.max(1) as f32;
             for row in 0..=tail_len {
-                let half = tail_half - row * tail_half / tail_len;
+                let half = tail_half as f32 * (1.0 - row as f32 / len);
                 let y = attach_y + dir * row;
-                self.fill_rect(tcx - half, y, half * 2 + 1, 1, bg);
-                self.put(tcx - half, y, border);
-                self.put(tcx + half, y, border);
+                self.hspan(y, cxf - half, cxf + half, bg);
+                if half >= 0.5 {
+                    self.cover_edge(y, cxf - half, border);
+                    self.cover_edge(y, cxf + half, border);
+                }
             }
         }
 
@@ -454,6 +529,23 @@ mod tests {
         assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
         // The body is opaque somewhere (not an all-transparent buffer).
         assert!(img.rgba.iter().skip(3).step_by(4).any(|&a| a == 0xFF));
+    }
+
+    #[test]
+    fn shape_edges_are_antialiased() {
+        // No text (empty line, no font), so any partial-alpha pixel must come from the
+        // antialiased shape edges — the rounded corners and the tapered tail.
+        let img = paint_balloon(
+            &[String::new()],
+            4,
+            1,
+            false,
+            &BalloonPaint { bg: [255, 255, 225], border: [0, 0, 0], text: [0, 0, 0], think: false },
+            None,
+            2.0,
+        );
+        let partial = img.rgba.iter().skip(3).step_by(4).filter(|&&a| a > 0 && a < 255).count();
+        assert!(partial > 0, "shape edges should be antialiased (have partial-alpha pixels)");
     }
 
     #[test]
