@@ -590,21 +590,23 @@ impl ActFile {
         if seg.len() < 12 {
             return None;
         }
-        let w = u32::from_le_bytes([seg[0], seg[1], seg[2], seg[3]]);
-        let h = u32::from_le_bytes([seg[4], seg[5], seg[6], seg[7]]);
-        let n = (w as usize).checked_mul(h as usize)?;
+        let w = u32::from_le_bytes([seg[0], seg[1], seg[2], seg[3]]) as usize;
+        let h = u32::from_le_bytes([seg[4], seg[5], seg[6], seg[7]]) as usize;
+        let n = w.checked_mul(h)?;
         if n == 0 || n > (1 << 24) {
             return None;
         }
-        // Bottom-up 8bpp RLE: control byte `c` — `c < 0x80` repeats the next byte `c` times;
+        // The raster is an 8bpp bottom-up DIB, so each row is padded to a 4-byte boundary.
+        // Genius (width 124) needs no padding, but e.g. TUTOR (width 143) does — decode the
+        // full padded stride, then copy just the `w` real pixels per row while flipping to
+        // top-down. RLE control byte `c`: `c < 0x80` repeats the next byte `c` times;
         // `c >= 0x80` copies the next `c & 0x7f` bytes literally.
-        let rows = decode_rle8(&seg[12..], n);
-        // Flip to top-down.
-        let (w, h) = (w as usize, h as usize);
+        let stride = (w + 3) & !3;
+        let rows = decode_rle8(&seg[12..], stride * h);
         let mut top = vec![ACTOR_TRANSPARENT_INDEX; n];
         for y in 0..h {
-            let src = &rows[(h - 1 - y) * w..(h - y) * w];
-            top[y * w..(y + 1) * w].copy_from_slice(src);
+            let s = (h - 1 - y) * stride;
+            top[y * w..(y + 1) * w].copy_from_slice(&rows[s..s + w]);
         }
         Some((w as u32, h as u32, top))
     }
