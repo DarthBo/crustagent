@@ -668,12 +668,17 @@ fn main() {
         std::process::exit(2);
     };
 
-    // Microsoft Actor (.act) files have no decoded animation timeline yet, so they don't
-    // go through the Agent runtime — run a minimal viewer that flips through their cels.
-    if std::path::Path::new(&path)
+    // Microsoft Actor files (`.act`, or the extensionless classic-Mac characters) use their
+    // own viewer rather than the Agent runtime. Detect by extension or the `LP`/`PL` signature
+    // (the classic-Mac files have no extension).
+    let is_actor = std::path::Path::new(&path)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("act"))
-    {
+        || std::fs::read(&path)
+            .ok()
+            .and_then(|d| d.get(0..2).map(|s| s == b"LP" || s == b"PL"))
+            .unwrap_or(false);
+    if is_actor {
         run_act_viewer(&path, positional.get(1).map(|s| s.as_str()), dry_run);
         return;
     }
