@@ -722,6 +722,21 @@ fn main() {
         // (the magician's puff-of-smoke appear). Greet/Wave are mid-scene gestures, not
         // the entrance, so we don't play them here.
         agent.show();
+        // Non-standard characters (e.g. sign-in assistants like Professor Presto) ship no
+        // state table at all, so Show lands on an empty rest frame and nothing appears.
+        // Play an animation directly — prefer an idle, else the first — so they're visible.
+        if agent.file().states.is_empty() {
+            let anim = agent
+                .file()
+                .animations
+                .iter()
+                .find(|a| a.name.to_ascii_uppercase().contains("IDLE"))
+                .or_else(|| agent.file().animations.first())
+                .map(|a| a.name.clone());
+            if let Some(a) = anim {
+                agent.play_looping(a);
+            }
+        }
     }
 
     let name = agent
