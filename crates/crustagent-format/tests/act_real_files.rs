@@ -70,26 +70,23 @@ fn parses_and_renders_actor_files() {
             }
         }
 
-        // WMF characters must have cels that render; bitmap/Mac ones legitimately have none.
-        if act.image_format == CelFormat::Wmf {
-            assert!(rendered > 0, "{}: no WMF cel rendered", path.display());
-
-            // Animation tables: poses, a frame graph, and named actions must decode, and a
-            // representative animation must composite to full character frames.
-            assert!(!act.poses.is_empty(), "{}: no poses", path.display());
-            assert!(!act.frames.is_empty(), "{}: no frames", path.display());
+        // Every little-endian PC character (WMF or MNAK-bitmap) decodes the same animation
+        // tables: poses, named actions with frame programs, and playable Idle.
+        if act.image_format == CelFormat::Wmf || act.image_format == CelFormat::Bitmap {
+            assert!(rendered > 0, "{}: no cel rendered", path.display());
             assert!(!act.actions.is_empty(), "{}: no actions", path.display());
-            // Every action starts within the frame graph, and all branch targets are valid.
-            let nframes = act.frames.len() as u16;
+            // Every action has at least one variant, and every variant is non-empty.
             for a in &act.actions {
+                assert!(!a.variants.is_empty(), "{}: {} no variants", path.display(), a.name);
                 assert!(
-                    a.first_frame < nframes,
-                    "{}: {} start oob",
+                    a.variants.iter().all(|v| !v.ops.is_empty()),
+                    "{}: {} empty variant",
                     path.display(),
                     a.name
                 );
             }
-            // Idle is present on Actor characters and must produce composited frames.
+            // Idle is present on Actor characters and its first shown object must composite
+            // to a full-size character frame.
             let idle = act.action("Idle").expect("Idle action");
             let seq = act.action_sequence(idle, 128);
             assert!(!seq.is_empty(), "{}: empty Idle sequence", path.display());

@@ -183,45 +183,54 @@ pub struct Pose {
     pub parts: Vec<Part>,
 }
 
-/// One probabilistic branch target of a frame: jump to `target` with likelihood
-/// `weight / 65536`. A frame's lone branch with `weight == 0` is an unconditional jump.
+/// What an object-table entry resolves to.
+#[derive(Clone, Copy, Debug)]
+enum ObjRef {
+    /// A leaf image at [`ActFile::cels`]`[_]`.
+    Cel(u32),
+    /// A composited pose at [`ActFile::poses`]`[_]`.
+    Pose(u32),
+    /// Undecodable / empty (drawn as a transparent frame).
+    Empty,
+}
+
+/// One step of an animation. Branch `target`s are indices into the same [`Animation::ops`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Branch {
-    pub target: u16,
-    pub weight: u16,
+pub enum Op {
+    /// Display `object` (an index into the object table — render with
+    /// [`ActFile::render_object`]) for `duration_ms`. Duration `0` is an instantaneous
+    /// routing step (the previous image stays on screen).
+    Show { object: u16, duration_ms: u16 },
+    /// With probability `weight / 65536`, jump to op `target`; otherwise fall through to the
+    /// next op. `weight == 0` never branches (a fall-through / terminal marker).
+    Branch { target: u16, weight: u16 },
+    /// Play embedded sound `id` (an index into [`ActFile::sounds`]) at `volume`; `pan` is a
+    /// balance/mode byte. Advances to the next op.
+    Sound { id: u16, volume: u8, pan: u8 },
+    /// Jump to op `target` once the animation has repeated `count` times (a bounded loop).
+    LoopBranch { target: u16, count: u16 },
+    /// Jump to op `target` when the host's mood / time-of-day state matches `state`.
+    StateBranch { target: u16, state: u16 },
 }
 
-/// One animation frame: show an object for a duration, then either advance to the next
-/// frame or take one of its [`branches`](AnimFrame::branches).
-#[derive(Clone, Debug)]
-pub struct AnimFrame {
-    /// Object index: `< cels.len()` is a bare image cel; otherwise a pose at
-    /// `poses[object - cels.len()]`. Render with [`ActFile::render_object`].
-    pub object: u16,
-    /// On-screen time in milliseconds.
-    pub duration_ms: u16,
-    /// Probabilistic branch targets. Empty ⇒ advance to the next frame; the leftover
-    /// probability (when weights sum to < 65536) also means "advance".
-    pub branches: Vec<Branch>,
-    /// This is an animation's terminal (return/exit) frame: after it, playback returns to
-    /// rest rather than flowing into the following frame (which belongs to another action).
-    pub exit: bool,
+/// One animation variant: a self-contained op list. Branch/loop/state targets index into
+/// `ops`; playback ends when the index runs past the end.
+#[derive(Clone, Debug, Default)]
+pub struct Animation {
+    pub ops: Vec<Op>,
 }
 
-/// A named animation (e.g. `"Greeting"`, `"Thinking"`), referenced by the classic
-/// Microsoft Actor action id. Playback starts at `first_frame` and follows the frame graph
-/// until an exit frame — see [`ActFile::action_sequence`].
+/// A named animation (e.g. `"Greeting"`, `"Thinking"`), referenced by the classic Microsoft
+/// Actor action id. An action holds one or more interchangeable `variants` (the engine picks
+/// one at random each time it plays); walk one with [`ActFile::action_sequence`].
 #[derive(Clone, Debug)]
 pub struct Action {
     /// Microsoft Actor action id (1 = Idle, 2 = Greeting, 24 = Thinking, …).
     pub id: u16,
     /// Human-readable name for `id`, or `"Action{id}"` if unknown.
     pub name: String,
-    /// Primary-segment frame count from the directory (a hint; the animation actually runs
-    /// until an exit frame, which may be longer).
-    pub count: u16,
-    /// Starting index into [`ActFile::frames`].
-    pub first_frame: u16,
+    /// Interchangeable animation variants (at least one).
+    pub variants: Vec<Animation>,
 }
 
 /// Names for the Office Assistant action ids, from Microsoft's official `MsoAnimationType`
@@ -286,12 +295,13 @@ pub struct ActFile {
     pub image_format: CelFormat,
     /// Artwork cels, in file order.
     pub cels: Vec<Cel>,
-    /// Poses (layered image parts). Empty unless the artwork is renderable WMF.
+    /// Poses (layered image parts) referenced by the object table. May be empty.
     pub poses: Vec<Pose>,
-    /// Animation frames (a global graph; actions index into this). Empty for non-WMF.
-    pub frames: Vec<AnimFrame>,
-    /// Named animations. Empty for non-WMF artwork.
+    /// Named animations, decoded from the character's action/frame tables.
     pub actions: Vec<Action>,
+    /// Object table: index → renderable (a cel or a pose). Animation `Show` ops and pose
+    /// parts reference objects by their index here. Private; use [`ActFile::render_object`].
+    objects: Vec<ObjRef>,
     /// Embedded sound effects, each a complete `RIFF`/`WAVE` byte stream.
     pub sounds: Vec<Vec<u8>>,
     /// The seven section offsets from the header (artwork, sounds, tables, strings).
@@ -481,10 +491,12 @@ impl ActFile {
             None => CelFormat::Bitmap,
         };
 
-        // Animation tables — poses (layered parts), the frame graph, and named actions.
-        // Only decoded for the WMF vector characters, whose layout is validated.
-        let (poses, frames, actions) = if image_format == CelFormat::Wmf {
-            parse_anim_tables(&r, &positions, art_end, &sections)
+        // Animation tables — the object table (index → cel/pose), poses, and named actions
+        // with their frame programs. Decoded for the little-endian PC characters (WMF and
+        // MNAK-bitmap alike; they share this format). The classic-Mac artwork isn't decoded
+        // to pixels, so its tables are skipped.
+        let (objects, poses, actions) = if !big_endian && !cels.is_empty() {
+            parse_animation(&r, &cels, &sections)
         } else {
             (Vec::new(), Vec::new(), Vec::new())
         };
@@ -506,8 +518,8 @@ impl ActFile {
             image_format,
             cels,
             poses,
-            frames,
             actions,
+            objects,
             sounds,
             sections,
             data,
@@ -620,9 +632,13 @@ impl ActFile {
     }
 
     /// Composite pose `index` (from [`ActFile::poses`]) into a full character frame, sized
-    /// [`ActFile::image_size`]. Parts are drawn in order, each cel placed at its
-    /// destination (twips ÷ 15 → pixels). Returns `None` if the pose can't be rendered.
+    /// [`ActFile::image_size`]. Parts are drawn in order, each part's source object placed at
+    /// its destination (twips ÷ 15 → pixels). Returns `None` if the pose can't be rendered.
     pub fn render_pose(&self, index: usize) -> Option<Rgba> {
+        self.render_pose_depth(index, 0)
+    }
+
+    fn render_pose_depth(&self, index: usize, depth: u8) -> Option<Rgba> {
         let pose = self.poses.get(index)?;
         let (cw, ch) = (self.image_size.0 as u32, self.image_size.1 as u32);
         if cw == 0 || ch == 0 {
@@ -630,28 +646,52 @@ impl ActFile {
         }
         let mut canvas = Rgba::transparent(cw, ch);
         for part in &pose.parts {
-            let Some(cel) = self.render_cel(part.image as usize) else {
+            // A part places another object (a leaf cel, or occasionally a nested pose) at its
+            // own destination rect. Render it at natural size; guard pose→pose cycles.
+            let Some(img) = self.render_leaf(part.image as usize, depth + 1) else {
                 continue;
             };
             let ox = (part.rect.0 as i32) / 15;
             let oy = (part.rect.1 as i32) / 15;
-            blit_over(&mut canvas, &cel, ox, oy);
+            blit_over(&mut canvas, &img, ox, oy);
         }
         Some(canvas)
     }
 
-    /// Render an animation frame's object to a full character frame ([`ActFile::image_size`]).
-    /// `object >= cels.len()` is a pose (composited). A sentinel (`0xFFFF`) or any other
-    /// out-of-range value is a blank/hidden frame → a fully transparent frame. Returns
-    /// `None` only if the frame size is unknown.
+    /// An object at its natural size: a leaf cel as rendered, or a pose composited onto the
+    /// character canvas. Used for pose parts (which then place it at their own rect).
+    fn render_leaf(&self, object: usize, depth: u8) -> Option<Rgba> {
+        if depth > 8 {
+            return None;
+        }
+        match self.objects.get(object) {
+            Some(&ObjRef::Cel(ci)) => self.render_cel(ci as usize),
+            Some(&ObjRef::Pose(pi)) => self.render_pose_depth(pi as usize, depth),
+            _ => None,
+        }
+    }
+
+    /// Render an object (by its index in the character's object table) to a full character
+    /// frame ([`ActFile::image_size`]). An object is either a composited pose or a bare image
+    /// cel (centered on the canvas); unknown/empty objects give a transparent frame. Animation
+    /// `Show` ops reference objects by this index. Returns `None` only if the frame size is 0.
     pub fn render_object(&self, object: usize) -> Option<Rgba> {
-        let pose = object.checked_sub(self.cels.len());
-        match pose {
-            Some(p) if p < self.poses.len() => self.render_pose(p),
-            _ => {
-                let (w, h) = (self.image_size.0 as u32, self.image_size.1 as u32);
-                (w != 0 && h != 0).then(|| Rgba::transparent(w, h))
+        let (w, h) = (self.image_size.0 as u32, self.image_size.1 as u32);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        match self.objects.get(object) {
+            Some(&ObjRef::Pose(pi)) => self.render_pose_depth(pi as usize, 0),
+            Some(&ObjRef::Cel(ci)) => {
+                let mut canvas = Rgba::transparent(w, h);
+                if let Some(cel) = self.render_cel(ci as usize) {
+                    let ox = (w as i32 - cel.width as i32) / 2;
+                    let oy = (h as i32 - cel.height as i32) / 2;
+                    blit_over(&mut canvas, &cel, ox, oy);
+                }
+                Some(canvas)
             }
+            _ => Some(Rgba::transparent(w, h)),
         }
     }
 
@@ -662,10 +702,11 @@ impl ActFile {
             .find(|a| a.name.eq_ignore_ascii_case(name))
     }
 
-    /// Resolve an action to a linear list of `(object, duration_ms)` steps by walking the
-    /// frame graph from its start frame. At each frame it advances, or takes a weighted
-    /// branch — like the ACS sequencer. `seed` makes the probabilistic choices reproducible;
-    /// `max_steps` bounds looping animations for a finite preview.
+    /// Resolve an action to a linear list of `(object, duration_ms)` display steps by running
+    /// its first variant's op program: `Show` emits a step, `Branch` takes its weighted jump
+    /// (probability `weight / 65536`), and sound/loop/state ops advance. `seed` makes the
+    /// probabilistic choices reproducible; `max_steps` bounds looping animations for a finite
+    /// preview. Playback ends when the op index runs past the program.
     pub fn action_sequence_seeded(
         &self,
         action: &Action,
@@ -673,8 +714,11 @@ impl ActFile {
         seed: u64,
     ) -> Vec<(u16, u16)> {
         let mut out = Vec::new();
+        let Some(anim) = action.variants.first() else {
+            return out;
+        };
         let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
-        let mut next = || {
+        let mut roll = || {
             // SplitMix64 step → a 16-bit roll.
             rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
             let mut z = rng;
@@ -682,42 +726,34 @@ impl ActFile {
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             ((z ^ (z >> 31)) & 0xFFFF) as u32
         };
-        let mut i = action.first_frame as usize;
+        let mut i = 0usize;
         let mut steps = 0usize;
-        while out.len() < max_steps && steps < max_steps * 4 {
+        while out.len() < max_steps && steps < max_steps * 8 {
             steps += 1;
-            let Some(frame) = self.frames.get(i) else {
+            let Some(&op) = anim.ops.get(i) else {
                 break;
             };
-            // Zero-duration frames are instantaneous routing nodes — walk through without
-            // displaying so they don't flash on screen.
-            if frame.duration_ms > 0 {
-                out.push((frame.object, frame.duration_ms));
-            }
-            // An exit (return) frame ends this action's animation — stop rather than flow
-            // into the next action's frames.
-            if frame.exit {
-                break;
-            }
-            let total: u32 = frame.branches.iter().map(|b| b.weight as u32).sum();
-            i = if frame.branches.is_empty() {
-                i + 1
-            } else if total == 0 {
-                frame.branches[0].target as usize // unconditional jump
-            } else {
-                // Weighted pick; the leftover probability means "advance".
-                let roll = next();
-                let mut acc = 0u32;
-                let mut chosen = None;
-                for b in &frame.branches {
-                    acc += b.weight as u32;
-                    if roll < acc {
-                        chosen = Some(b.target as usize);
-                        break;
+            match op {
+                Op::Show {
+                    object,
+                    duration_ms,
+                } => {
+                    // Zero-duration shows are instantaneous routing steps — don't emit.
+                    if duration_ms > 0 {
+                        out.push((object, duration_ms));
+                    }
+                    i += 1;
+                }
+                Op::Branch { target, weight } => {
+                    if weight > 0 && roll() < weight as u32 {
+                        i = target as usize;
+                    } else {
+                        i += 1;
                     }
                 }
-                chosen.unwrap_or(i + 1)
-            };
+                // Sound and the loop/state branches don't affect a linear preview; advance.
+                _ => i += 1,
+            }
         }
         out
     }
@@ -822,168 +858,154 @@ fn extract_wave_streams(data: &[u8]) -> Vec<Vec<u8>> {
 
 /// Decode the object directory (poses), the frame graph, and the named actions for a WMF
 /// character. Tolerant: returns whatever parses cleanly, or empties on any mismatch.
-fn parse_anim_tables(
-    r: &Rdr,
-    cel_positions: &[usize],
-    art_end: usize,
-    sections: &[u32; 7],
-) -> (Vec<Pose>, Vec<AnimFrame>, Vec<Action>) {
+/// Decode the character's animation tables — the object table (index → cel/pose), the poses,
+/// and the named actions with their frame programs. This is the format the Actor engine
+/// actually uses; the WMF (Clippit, Rover) and MNAK-bitmap (The Genius) PC characters share
+/// it. Region offsets come from the 70-byte char-info header at the body base (mirrored into
+/// `sections`, relative to that base); the artwork pool begins at the first cel.
+fn parse_animation(r: &Rdr, cels: &[Cel], sections: &[u32; 7]) -> (Vec<ObjRef>, Vec<Pose>, Vec<Action>) {
     let empty = || (Vec::new(), Vec::new(), Vec::new());
-    let ncel = cel_positions.len();
-    if ncel < 3 {
-        return empty();
-    }
-    let base = cel_positions[0];
-    let sec0 = sections[0] as usize;
-    let lim = (art_end - base) as u32;
-
-    // Locate the object directory inside section[0] by matching the known cel end-offsets
-    // (object i's end == the next cel's start). No reliance on a fixed header size.
-    let want0 = (cel_positions[1] - base) as u32;
-    let want1 = (cel_positions[2] - base) as u32;
-    let mut dir_pos = None;
-    for q in sec0..(sec0 + 64).min(r.b.len().saturating_sub(8)) {
-        if r.u32(q) == want0 && r.u32(q + 4) == want1 {
-            dir_pos = Some(q);
-            break;
-        }
-    }
-    let Some(mut q) = dir_pos else {
-        return empty();
-    };
-    // Read all object end-offsets (increasing, within the artwork region).
-    let mut ends = Vec::new();
-    while q + 4 <= r.b.len() {
-        let v = r.u32(q);
-        if v >= lim || (ends.last().is_some_and(|&p| v <= p)) {
-            break;
-        }
-        ends.push(v);
-        q += 4;
-    }
-    let nobj = ends.len();
-    if nobj <= ncel {
+    let art_base = cels[0].offset;
+    // Header region fields are relative to the body base (the first outer section offset).
+    let body_base = r.u32(10) as usize;
+    let region = |i: usize| body_base + sections[i] as usize;
+    let (objdir_s, objdir_e) = (region(0), region(1));
+    let (frames_s, frames_e) = (region(3), region(4));
+    let (act_s, act_e) = (region(4), region(5));
+    let n = r.b.len();
+    if objdir_e > n || frames_e > n || act_e > n || objdir_s >= objdir_e || act_s >= act_e {
         return empty();
     }
 
-    // Poses: objects [ncel, nobj). Object o spans [base + ends[o-1], base + ends[o]).
-    let mut poses = Vec::with_capacity(nobj - ncel);
-    for o in ncel..nobj {
-        let s = base + ends[o - 1] as usize;
-        let e = base + ends[o] as usize;
-        let count = r.u16(s + 2) as usize;
-        let mut parts = Vec::with_capacity(count);
-        for p in 0..count {
-            let po = s + 4 + p * 10;
-            if po + 10 > e {
-                break;
-            }
-            parts.push(Part {
-                image: r.u16(po),
-                rect: (r.i16(po + 2), r.i16(po + 4), r.i16(po + 6), r.i16(po + 8)),
-            });
+    // Object directory: one u32 per object. Low 30 bits = byte offset into the artwork pool
+    // (relative to `art_base`); top 2 bits = sub-image selector (for multi-image MNAK blocks).
+    let nobj = (objdir_e - objdir_s) / 4;
+    let mut cel_at: std::collections::HashMap<(usize, u16), usize> = std::collections::HashMap::new();
+    for (i, c) in cels.iter().enumerate() {
+        if let Some(off) = c.offset.checked_sub(art_base) {
+            cel_at.entry((off, c.sub)).or_insert(i);
         }
-        poses.push(Pose { parts });
     }
-
-    // Frame graph: section[3]. Find the frame start by trying offsets until the walk lands
-    // exactly on section[4]. Each frame is (object u16, durationMs u16, branchType u16) plus
-    // a 6-byte branch when branchType is 1 (jump) or 2 (probable); branchType 0x0100 ends a
-    // list and is followed by a u32 to skip. Frames are flattened to one global index space.
-    let s3 = sections[3] as usize;
-    let s3_end = sections[4] as usize;
-    // The frame stream is preceded by a header (a leading word + several cel-pool offsets)
-    // terminated by the first end-of-list marker (u16 0x0100) and a u32. Candidate frame
-    // starts are just past each such marker; take the first whose walk consumes the section
-    // (so the header's cel offsets aren't mis-parsed as frames, which would shift indices).
-    let ncel_u16 = ncel as u16;
-    let marker_starts: Vec<usize> = (s3..s3_end.saturating_sub(6))
-        .step_by(2)
-        .filter(|&p| r.u16(p) == 0x0100)
-        .map(|p| p + 6)
-        // The first frame shows the first pose (object == ncel); this pins the true start
-        // so the header's cel offsets aren't mis-parsed as frames (which shifts all indices).
-        .filter(|&start| r.u16(start) == ncel_u16)
+    // Distinct artwork offsets, ascending: a pose object spans [offset, next-distinct-offset).
+    // The pool ends where the object directory begins.
+    let mut distinct: Vec<usize> = (0..nobj)
+        .map(|k| (r.u32(objdir_s + k * 4) & 0x3FFF_FFFF) as usize)
         .collect();
-    let frames = marker_starts.into_iter().find_map(|start| {
-        let mut fr = Vec::new();
-        let mut p = start;
-        while p + 6 <= s3_end {
-            let object = r.u16(p);
-            let duration_ms = r.u16(p + 2);
-            let bt = r.u16(p + 4);
-            p += 6;
-            if bt == 0x0100 {
-                p += 4; // end-of-list marker + count
+    distinct.sort_unstable();
+    distinct.dedup();
+    let pool_end = objdir_s.saturating_sub(art_base);
+    let next_distinct = |off: usize| -> usize {
+        match distinct.binary_search(&off) {
+            Ok(i) => distinct.get(i + 1).copied().unwrap_or(pool_end),
+            Err(i) => distinct.get(i).copied().unwrap_or(pool_end),
+        }
+    };
+
+    let mut objects = Vec::with_capacity(nobj);
+    let mut poses: Vec<Pose> = Vec::new();
+    let mut pose_at: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for k in 0..nobj {
+        let entry = r.u32(objdir_s + k * 4);
+        let off = (entry & 0x3FFF_FFFF) as usize;
+        let sub = (entry >> 30) as u16;
+        if let Some(&ci) = cel_at.get(&(off, sub)) {
+            objects.push(ObjRef::Cel(ci as u32));
+            continue;
+        }
+        let s = art_base + off;
+        // A pose object begins with the composite type word (0x0014).
+        if s + 4 <= n && r.u16(s) == 0x0014 {
+            let idx = *pose_at.entry(off).or_insert_with(|| {
+                let e = (art_base + next_distinct(off)).min(n);
+                poses.push(parse_pose(r, s, e));
+                (poses.len() - 1) as u32
+            });
+            objects.push(ObjRef::Pose(idx));
+        } else {
+            objects.push(ObjRef::Empty);
+        }
+    }
+
+    // Action table: u16 count, u16 pad, then `count` 6-byte (id, nVariants, firstPtrIndex)
+    // headers sorted by id, then a shared array of 6-byte (u32 frameOffset, u16 length)
+    // frame-pointer records. Variant v of an action is pointer index `count + firstPtrIndex + v`.
+    let count = r.u16(act_s) as usize;
+    let hdr = act_s + 4;
+    let ptr0 = hdr + count * 6;
+    let mut actions = Vec::new();
+    if count > 0 && count < 4096 && ptr0 <= act_e {
+        for i in 0..count {
+            let o = hdr + i * 6;
+            let id = r.u16(o);
+            let nvar = r.u16(o + 2) as usize;
+            let first = r.u16(o + 4) as usize;
+            let mut variants = Vec::new();
+            for v in 0..nvar.min(64) {
+                let pr = ptr0 + (first + v) * 6;
+                if pr + 6 > act_e {
+                    break;
+                }
+                let off = r.u32(pr) as usize;
+                let len = r.u16(pr + 4) as usize;
+                let blob = frames_s + off;
+                if blob + 4 > frames_e || blob + len > frames_e {
+                    continue;
+                }
+                variants.push(parse_animation_blob(r, blob, len));
+            }
+            if variants.is_empty() {
                 continue;
             }
-            if bt > 2 {
-                return None; // not the frame stream (or wrong start)
-            }
-            // Branches (when bt != 0) are a linked list: each is (target, weight, continue),
-            // read until a `continue` word of 0 ends the chain.
-            let mut branches = Vec::new();
-            if bt != 0 {
-                for _ in 0..8 {
-                    branches.push(Branch {
-                        target: r.u16(p),
-                        weight: r.u16(p + 2),
-                    });
-                    let cont = r.u16(p + 4);
-                    p += 6;
-                    if cont == 0 {
-                        break;
-                    }
-                }
-            }
-            fr.push(AnimFrame {
-                object,
-                duration_ms,
-                branches,
-                exit: bt == 1,
-            });
+            let name = action_name(id)
+                .map(String::from)
+                .unwrap_or_else(|| format!("Action{id}"));
+            actions.push(Action { id, name, variants });
         }
-        // Accept when the walk consumed the section (the last marker leaves a few bytes).
-        (p >= s3_end.saturating_sub(6) && !fr.is_empty()).then_some(fr)
-    });
-    let Some(frames) = frames else {
-        return (poses, Vec::new(), Vec::new());
-    };
-
-    // Actions: section[4] u16 stream of (actionId, count, firstFrame) triples. Find the run
-    // by scanning for the first triple sequence whose ids/frames all validate.
-    let s4 = sections[4] as usize;
-    let s4_end = sections[5] as usize;
-    let nframes = frames.len() as u16;
-    let valid = |aid: u16| action_name(aid).is_some();
-    let mut actions = Vec::new();
-    let mut best: Vec<Action> = Vec::new();
-    let mut start = s4;
-    while start + 6 <= s4_end {
-        let mut acts = Vec::new();
-        let mut p = start;
-        while p + 6 <= s4_end {
-            let id = r.u16(p);
-            let count = r.u16(p + 2);
-            let first = r.u16(p + 4);
-            if !valid(id) || count == 0 || count > 64 || first >= nframes {
-                break;
-            }
-            acts.push(Action {
-                id,
-                name: action_name(id).unwrap().to_string(),
-                count,
-                first_frame: first,
-            });
-            p += 6;
-        }
-        if acts.len() > best.len() {
-            best = acts;
-        }
-        start += 2;
     }
-    actions.append(&mut best);
-    (poses, frames, actions)
+
+    (objects, poses, actions)
+}
+
+/// Parse a pose (composite) object: `u16 type(0x14)`, `u16 partCount`, then 10-byte parts
+/// `(u16 object, i16 left, i16 top, i16 right, i16 bottom)` — each a source object placed at a
+/// destination rectangle in twips.
+fn parse_pose(r: &Rdr, s: usize, e: usize) -> Pose {
+    let count = r.u16(s + 2) as usize;
+    let mut parts = Vec::with_capacity(count);
+    for p in 0..count {
+        let po = s + 4 + p * 10;
+        if po + 10 > e {
+            break;
+        }
+        parts.push(Part {
+            image: r.u16(po),
+            rect: (r.i16(po + 2), r.i16(po + 4), r.i16(po + 6), r.i16(po + 8)),
+        });
+    }
+    Pose { parts }
+}
+
+/// Decode one animation variant: `u16 0x0100` marker, `u16 opCount`, then `opCount` 6-byte
+/// records `(u16 opcode, u16, u16)`. Opcodes: 0 show, 1 random branch, 2 sound, 3 loop
+/// branch, 4 state branch.
+fn parse_animation_blob(r: &Rdr, blob: usize, len: usize) -> Animation {
+    // Clamp the declared op count to what the blob length can hold (4-byte header + 6/op).
+    let count = (r.u16(blob + 2) as usize).min(len.saturating_sub(4) / 6);
+    let mut ops = Vec::with_capacity(count);
+    for k in 0..count {
+        let o = blob + 4 + k * 6;
+        let (op, a, b) = (r.u16(o), r.u16(o + 2), r.u16(o + 4));
+        ops.push(match op {
+            0 => Op::Show { object: a, duration_ms: b },
+            1 => Op::Branch { target: a, weight: b },
+            2 => Op::Sound { id: a, volume: (b & 0xff) as u8, pan: (b >> 8) as u8 },
+            3 => Op::LoopBranch { target: a, count: b },
+            4 => Op::StateBranch { target: a, state: b },
+            // Unknown opcode: fall through (weight-0 branch keeps op indices aligned).
+            _ => Op::Branch { target: 0, weight: 0 },
+        });
+    }
+    Animation { ops }
 }
 
 /// Minimal interpreter for the Windows Metafile subset used by actor cels: window

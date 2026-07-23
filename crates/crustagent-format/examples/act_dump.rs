@@ -43,11 +43,15 @@ fn main() {
     println!("Artwork    : {:?}", act.image_format);
     println!("Cels       : {}", act.cels.len());
     println!("Poses      : {}", act.poses.len());
-    println!("Frames     : {}", act.frames.len());
     println!("Sounds     : {} embedded WAVE stream(s)", act.sounds.len());
     if !act.actions.is_empty() {
+        let variants: usize = act.actions.iter().map(|a| a.variants.len()).sum();
         let names: Vec<String> = act.actions.iter().map(|a| a.name.clone()).collect();
-        println!("Actions    : {} — {}", act.actions.len(), names.join(", "));
+        println!(
+            "Actions    : {} ({variants} variants) — {}",
+            act.actions.len(),
+            names.join(", ")
+        );
     }
 
     // With a second arg, render: an action name -> its first frame, or a cel index -> PNG.
