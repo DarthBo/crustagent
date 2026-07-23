@@ -808,7 +808,7 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         .or_else(|| act.actions.iter().position(|a| a.name == "Idle"))
         .unwrap_or(0);
     println!(
-        "Actor {}: {} actions. Left-drag to move, right-click to cycle, Esc/Q to quit.",
+        "Actor {}: {} actions. ←/→ (or space / right-click) cycle actions, left-drag moves, Esc/Q quits.",
         act.name,
         act.actions.len()
     );
@@ -880,6 +880,14 @@ impl ActApp {
         println!("  playing {:?}", self.act.actions[i].name);
     }
 
+    /// Switch to action `i` and repaint.
+    fn switch_action(&mut self, i: usize) {
+        self.load_action(i);
+        if let Some(win) = self.window.as_ref() {
+            win.request_redraw();
+        }
+    }
+
     /// Center the current frame (scaled by `SCALE`) on a `w`×`h` transparent buffer.
     fn compose(&mut self, w: u32, h: u32) {
         self.scratch.clear();
@@ -920,11 +928,17 @@ impl ApplicationHandler for ActApp {
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if matches!(
-                    event.physical_key,
-                    PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ)
-                ) {
-                    el.exit();
+                let n = self.act.actions.len();
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) => el.exit(),
+                    // Cycle actions with arrows / space (reliable across platforms).
+                    PhysicalKey::Code(
+                        KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Space,
+                    ) => self.switch_action((self.action + 1) % n),
+                    PhysicalKey::Code(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                        self.switch_action((self.action + n - 1) % n)
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::MouseInput {
@@ -941,11 +955,7 @@ impl ApplicationHandler for ActApp {
                     }
                     // Right-click cycles to the next action.
                     MouseButton::Right => {
-                        let next = (self.action + 1) % self.act.actions.len();
-                        self.load_action(next);
-                        if let Some(win) = self.window.as_ref() {
-                            win.request_redraw();
-                        }
+                        self.switch_action((self.action + 1) % self.act.actions.len())
                     }
                     _ => {}
                 }
