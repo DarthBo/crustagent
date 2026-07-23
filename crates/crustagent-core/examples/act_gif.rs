@@ -4,8 +4,9 @@
 //!
 //! With an action name (e.g. `Greeting`, `Thinking`, `Searching`) the frame graph is
 //! walked and each frame's pose is composited to the character's full frame. With no name
-//! (or `cels`) it flips through every artwork cel instead. Non-WMF artwork (The Genius,
-//! the classic-Mac files) isn't rasterized yet.
+//! (or `cels`) it flips through every artwork cel instead. Bitmap characters (The Genius)
+//! have no decoded frame graph yet, so they always use the cel gallery. The classic-Mac
+//! artwork codec isn't rasterized yet.
 
 use crustagent_format::act::CelFormat;
 use crustagent_format::{ActFile, Rgba};
@@ -25,7 +26,7 @@ fn main() {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
     });
-    if act.image_format != CelFormat::Wmf {
+    if !matches!(act.image_format, CelFormat::Wmf | CelFormat::Bitmap) {
         eprintln!(
             "{}: artwork is {:?}, which isn't rasterized yet",
             act.name, act.image_format

@@ -111,12 +111,14 @@ Implemented:
   Greeting, Thinking, … by their Actor action ids) all parse, and [`ActFile::render_object`]
   **composites** any frame to a full RGBA character frame. `ActFile::action_sequence` walks
   an action's frames like the ACS sequencer.
-  The newer compressed-bitmap cels (The Genius, tagged `MNAK`) **decompress** with the same
-  LZ77 as ACS, but their decompressed pixel body — and the classic-Mac artwork codec — aren't
-  decoded to pixels yet; those files still parse and report their artwork format.
+  The newer compressed-bitmap cels (The Genius, tagged `MNAK`) also **rasterize**: the `MNAK`
+  block LZ77-decompresses (same bitstream as ACS) into several run-length-encoded 8bpp
+  sub-images, and [`ActFile::render_cel`] colors each with the standard Windows palette to
+  full RGBA. Their animation frame graph isn't decoded yet, so bitmap characters play as a
+  cel gallery. The classic-Mac artwork codec still isn't decoded.
 
-Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the ACT bitmap-body/Mac
-artwork codecs and animation/state tables, and a small set of files with an
+Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the bitmap-character
+animation/state tables, the classic-Mac artwork codec, and a small set of files with an
 obfuscated/variant 2.0 char-info block. Run the `sweep` example to audit a character
 library against the parser.
 

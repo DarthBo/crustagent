@@ -48,10 +48,11 @@ fn parses_and_renders_actor_files() {
             path.display()
         );
 
-        // Every WMF cel must render without panicking, and its size must match its bounds.
+        // Every renderable cel (WMF or bitmap) must render without panicking; WMF sizes must
+        // match their bounds.
         let mut rendered = 0usize;
         for (i, cel) in act.cels.iter().enumerate() {
-            if cel.format != CelFormat::Wmf {
+            if !matches!(cel.format, CelFormat::Wmf | CelFormat::Bitmap) {
                 continue;
             }
             if let Some(img) = act.render_cel(i) {
@@ -100,16 +101,41 @@ fn parses_and_renders_actor_files() {
             assert_eq!(frame.height, act.image_size.1 as u32);
         }
 
-        // Compressed (MNAK) bitmap cels must decompress to their declared size, with a
-        // sane width/height header (we can't rasterize the body yet, but the LZ layer works).
+        // Compressed (MNAK) bitmap characters must decompress, decode, and rasterize their
+        // cels to plausibly-sized, non-blank rasters.
         if act.image_format == CelFormat::Bitmap {
-            let out = act.decompress_cel(0).expect("decompress MNAK cel 0");
-            assert!(out.len() >= 12, "{}: tiny decode", path.display());
-            let w = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
-            let h = u32::from_le_bytes([out[4], out[5], out[6], out[7]]);
+            assert!(rendered > 0, "{}: no bitmap cel rendered", path.display());
+            let (w, h, indices) = act.decode_bitmap_cel(0).expect("decode MNAK cel 0");
             assert!(
                 (1..=4096).contains(&w) && (1..=4096).contains(&h),
                 "{}: implausible MNAK cel size {w}x{h}",
+                path.display()
+            );
+            assert_eq!(
+                indices.len(),
+                (w * h) as usize,
+                "{}: index count",
+                path.display()
+            );
+            // A cel isn't all background — it draws something.
+            let painted = indices
+                .iter()
+                .filter(|&&i| i != crustagent_format::act::ACTOR_TRANSPARENT_INDEX)
+                .count();
+            assert!(painted > 50, "{}: MNAK cel 0 looks blank", path.display());
+            // And it rasterizes to a same-sized RGBA image with opaque pixels.
+            let img = act.render_cel(0).expect("render MNAK cel 0");
+            assert_eq!((img.width, img.height), (w, h));
+            let opaque = img
+                .pixels
+                .iter()
+                .skip(3)
+                .step_by(4)
+                .filter(|&&a| a != 0)
+                .count();
+            assert!(
+                opaque > 50,
+                "{}: rendered MNAK cel 0 fully transparent",
                 path.display()
             );
         }

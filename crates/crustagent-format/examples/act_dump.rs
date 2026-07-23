@@ -81,7 +81,7 @@ fn main() {
         return;
     };
     match act.cels.get(idx).map(|c| c.format) {
-        Some(CelFormat::Wmf) => match act.render_cel(idx) {
+        Some(CelFormat::Wmf | CelFormat::Bitmap) => match act.render_cel(idx) {
             Some(img) => {
                 std::fs::write(&out_path, encode_png(&img)).unwrap();
                 println!("wrote {out_path} ({}x{})", img.width, img.height);

@@ -782,7 +782,7 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
     });
-    if act.image_format != CelFormat::Wmf {
+    if !matches!(act.image_format, CelFormat::Wmf | CelFormat::Bitmap) {
         eprintln!(
             "{}: artwork is {:?}, which isn't decoded yet — nothing to show",
             act.name, act.image_format
@@ -793,10 +793,9 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         eprintln!("{}: no renderable cels", act.name);
         std::process::exit(1);
     }
-    if act.actions.is_empty() {
-        eprintln!("{}: no animations to play", act.name);
-        std::process::exit(1);
-    }
+    // Bitmap characters (The Genius) have no decoded frame graph — flip through every cel
+    // as a gallery instead. WMF characters with no action table fall back the same way.
+    let gallery = act.actions.is_empty();
 
     // Start on the requested action, else Idle, else the first.
     let start = action_name
@@ -807,17 +806,28 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         })
         .or_else(|| act.actions.iter().position(|a| a.name == "Idle"))
         .unwrap_or(0);
-    println!(
-        "Actor {}: {} actions. ←/→ (or space / right-click) cycle actions, left-drag moves, Esc/Q quits.",
-        act.name,
-        act.actions.len()
-    );
-    if dry_run {
-        let seq = act.action_sequence(&act.actions[start], 300);
+    if gallery {
         println!(
-            "  {:?}: {} frame(s) in a {}x{} window (@{}x)",
-            act.actions[start].name,
-            seq.len(),
+            "Actor {}: {} cels (no action table) — playing the cel gallery. Left-drag moves, Esc/Q quits.",
+            act.name,
+            act.cels.len()
+        );
+    } else {
+        println!(
+            "Actor {}: {} actions. ←/→ (or space / right-click) cycle actions, left-drag moves, Esc/Q quits.",
+            act.name,
+            act.actions.len()
+        );
+    }
+    if dry_run {
+        let n = if gallery {
+            act.cels.len()
+        } else {
+            act.action_sequence(&act.actions[start], 300).len()
+        };
+        println!(
+            "  {} frame(s) in a {}x{} window (@{}x)",
+            n,
             act.image_size.0 * SCALE as u16,
             act.image_size.1 * SCALE as u16,
             SCALE
@@ -829,6 +839,7 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
     let mut app = ActApp {
         act,
         action: start,
+        gallery,
         frames: Vec::new(),
         canvas,
         index: 0,
@@ -846,6 +857,9 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
 struct ActApp {
     act: ActFile,
     action: usize,
+    /// Play every cel in sequence instead of a named action (bitmap characters, or WMF
+    /// files with no action table).
+    gallery: bool,
     /// Composited frames of the current action, each with its on-screen duration (ms).
     frames: Vec<(Rgba, u64)>,
     canvas: (u32, u32),
@@ -857,17 +871,24 @@ struct ActApp {
 }
 
 impl ActApp {
-    /// Resolve action `i` to its composited animation frames (skips empty results).
+    /// Resolve action `i` to its composited animation frames (skips empty results). In
+    /// gallery mode it loads every cel instead, at a fixed frame rate.
     fn load_action(&mut self, i: usize) {
-        let seq = self.act.action_sequence(&self.act.actions[i], 300);
-        self.frames = seq
-            .iter()
-            .filter_map(|&(obj, dur)| {
-                self.act
-                    .render_object(obj as usize)
-                    .map(|img| (img, (dur as u64).max(40)))
-            })
-            .collect();
+        if self.gallery {
+            self.frames = (0..self.act.cels.len())
+                .filter_map(|c| self.act.render_cel(c).map(|img| (img, 80u64)))
+                .collect();
+        } else {
+            let seq = self.act.action_sequence(&self.act.actions[i], 300);
+            self.frames = seq
+                .iter()
+                .filter_map(|&(obj, dur)| {
+                    self.act
+                        .render_object(obj as usize)
+                        .map(|img| (img, (dur as u64).max(40)))
+                })
+                .collect();
+        }
         if self.frames.is_empty() {
             // Fall back to a single rest cel so the window never goes empty.
             if let Some(img) = self.act.render_cel(0) {
@@ -877,7 +898,9 @@ impl ActApp {
         self.action = i;
         self.index = 0;
         self.last_advance = Instant::now();
-        println!("  playing {:?}", self.act.actions[i].name);
+        if !self.gallery {
+            println!("  playing {:?}", self.act.actions[i].name);
+        }
     }
 
     /// Switch to action `i` and repaint.
@@ -934,8 +957,8 @@ impl ApplicationHandler for ActApp {
                     // Cycle actions with arrows / space (reliable across platforms).
                     PhysicalKey::Code(
                         KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Space,
-                    ) => self.switch_action((self.action + 1) % n),
-                    PhysicalKey::Code(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                    ) if n > 0 => self.switch_action((self.action + 1) % n),
+                    PhysicalKey::Code(KeyCode::ArrowLeft | KeyCode::ArrowUp) if n > 0 => {
                         self.switch_action((self.action + n - 1) % n)
                     }
                     _ => {}
@@ -954,7 +977,7 @@ impl ApplicationHandler for ActApp {
                         }
                     }
                     // Right-click cycles to the next action.
-                    MouseButton::Right => {
+                    MouseButton::Right if !self.act.actions.is_empty() => {
                         self.switch_action((self.action + 1) % self.act.actions.len())
                     }
                     _ => {}

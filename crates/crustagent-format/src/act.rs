@@ -20,12 +20,13 @@
 //! each cel is an **Aldus Placeable Windows Metafile** (a vector drawing — filled polygons
 //! with pen/brush colors) which [`ActFile::render_cel`] rasterizes to [`Rgba`].
 //!
-//! Newer PC characters (e.g. The Genius) instead store each cel as an LZ-compressed block
-//! tagged `MNAK` — the compression is the same bitstream as ACS, so [`ActFile::decompress_cel`]
-//! recovers the raw bytes, but the decompressed cel *body* is a further encoding that isn't
-//! decoded yet (so those cels can't be rasterized). The classic-Mac artwork codec is a
-//! different, still-undecoded form. In all cases the container still parses (identity,
-//! palette, sounds) and reports each cel's encoding via [`CelFormat`].
+//! Newer PC characters (e.g. The Genius) instead store their artwork as LZ-compressed
+//! blocks tagged `MNAK`. Each block holds several sub-images; each is an 8bpp raster under
+//! a simple run-length encoding. [`ActFile::render_cel`] decodes these too, coloring them
+//! with the standard Windows 256-color palette (index 10 is the transparent color key).
+//! The classic-Mac artwork codec is a different, still-undecoded form. In all cases the
+//! container still parses (identity, palette, sounds) and reports each cel's encoding via
+//! [`CelFormat`].
 //!
 //! ```no_run
 //! use crustagent_format::act::ActFile;
@@ -38,7 +39,7 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::model::{Color, Rgba};
+use crate::model::{Color, Indexed, Rgba};
 
 /// Signature bytes of a little-endian (PC) actor file.
 pub const ACT_SIGNATURE_LE: [u8; 2] = *b"LP";
@@ -48,12 +49,102 @@ pub const ACT_SIGNATURE_BE: [u8; 2] = *b"PL";
 /// The Aldus Placeable Metafile magic key (`0x9AC6CDD7`) that begins each WMF cel.
 const PLACEABLE_KEY: u32 = 0x9AC6_CDD7;
 
+/// The palette index that Microsoft Actor treats as the transparent color key.
+pub const ACTOR_TRANSPARENT_INDEX: u8 = 0x0A;
+
+/// The standard Windows 256-color ("halftone") palette, as RGB triples. `MNAK` bitmap cels
+/// carry no palette of their own — the engine colors them from this system palette (index 10
+/// is the transparent color key).
+const HALFTONE_RGB: [u8; 768] = [
+    0, 0, 0, 128, 0, 0, 0, 128, 0, 128, 128, 0, 0, 0, 128, 128, 0, 128, 0, 128, 128, 192, 192, 192,
+    192, 220, 192, 166, 202, 240, 4, 4, 4, 8, 8, 8, 12, 12, 12, 17, 17, 17, 22, 22, 22, 28, 28, 28,
+    34, 34, 34, 41, 41, 41, 85, 85, 85, 77, 77, 77, 66, 66, 66, 57, 57, 57, 255, 124, 128, 255, 80,
+    80, 214, 0, 147, 204, 236, 255, 239, 214, 198, 231, 231, 214, 173, 169, 144, 51, 0, 0, 102, 0,
+    0, 153, 0, 0, 204, 0, 0, 0, 51, 0, 51, 51, 0, 102, 51, 0, 153, 51, 0, 204, 51, 0, 255, 51, 0,
+    0, 102, 0, 51, 102, 0, 102, 102, 0, 153, 102, 0, 204, 102, 0, 255, 102, 0, 0, 153, 0, 51, 153,
+    0, 102, 153, 0, 153, 153, 0, 204, 153, 0, 255, 153, 0, 0, 204, 0, 51, 204, 0, 102, 204, 0, 153,
+    204, 0, 204, 204, 0, 255, 204, 0, 102, 255, 0, 153, 255, 0, 204, 255, 0, 0, 0, 51, 51, 0, 51,
+    102, 0, 51, 153, 0, 51, 204, 0, 51, 255, 0, 51, 0, 51, 51, 51, 51, 51, 102, 51, 51, 153, 51,
+    51, 204, 51, 51, 255, 51, 51, 0, 102, 51, 51, 102, 51, 102, 102, 51, 153, 102, 51, 204, 102,
+    51, 255, 102, 51, 0, 153, 51, 51, 153, 51, 102, 153, 51, 153, 153, 51, 204, 153, 51, 255, 153,
+    51, 0, 204, 51, 51, 204, 51, 102, 204, 51, 153, 204, 51, 204, 204, 51, 255, 204, 51, 51, 255,
+    51, 102, 255, 51, 153, 255, 51, 204, 255, 51, 255, 255, 51, 0, 0, 102, 51, 0, 102, 102, 0, 102,
+    153, 0, 102, 204, 0, 102, 255, 0, 102, 0, 51, 102, 51, 51, 102, 102, 51, 102, 153, 51, 102,
+    204, 51, 102, 255, 51, 102, 0, 102, 102, 51, 102, 102, 102, 102, 102, 153, 102, 102, 204, 102,
+    102, 0, 153, 102, 51, 153, 102, 102, 153, 102, 153, 153, 102, 204, 153, 102, 255, 153, 102, 0,
+    204, 102, 51, 204, 102, 153, 204, 102, 204, 204, 102, 255, 204, 102, 0, 255, 102, 51, 255, 102,
+    153, 255, 102, 204, 255, 102, 255, 0, 204, 204, 0, 255, 0, 153, 153, 153, 51, 153, 153, 0, 153,
+    204, 0, 153, 0, 0, 153, 51, 51, 153, 102, 0, 153, 204, 51, 153, 255, 0, 153, 0, 102, 153, 51,
+    102, 153, 102, 51, 153, 153, 102, 153, 204, 102, 153, 255, 51, 153, 51, 153, 153, 102, 153,
+    153, 153, 153, 153, 204, 153, 153, 255, 153, 153, 0, 204, 153, 51, 204, 153, 102, 204, 102,
+    153, 204, 153, 204, 204, 153, 255, 204, 153, 0, 255, 153, 51, 255, 153, 102, 204, 153, 153,
+    255, 153, 204, 255, 153, 255, 255, 153, 0, 0, 204, 51, 0, 153, 102, 0, 204, 153, 0, 204, 204,
+    0, 204, 0, 51, 153, 51, 51, 204, 102, 51, 204, 153, 51, 204, 204, 51, 204, 255, 51, 204, 0,
+    102, 204, 51, 102, 204, 102, 102, 153, 153, 102, 204, 204, 102, 204, 255, 102, 153, 0, 153,
+    204, 51, 153, 204, 102, 153, 204, 153, 153, 204, 204, 153, 204, 255, 153, 204, 0, 204, 204, 51,
+    204, 204, 102, 204, 204, 153, 204, 204, 204, 204, 204, 255, 204, 204, 0, 255, 204, 51, 255,
+    204, 102, 255, 153, 153, 255, 204, 204, 255, 204, 255, 255, 204, 51, 0, 204, 102, 0, 255, 153,
+    0, 255, 0, 51, 204, 51, 51, 255, 102, 51, 255, 153, 51, 255, 204, 51, 255, 255, 51, 255, 0,
+    102, 255, 51, 102, 255, 102, 102, 204, 153, 102, 255, 204, 102, 255, 255, 102, 204, 0, 153,
+    255, 51, 153, 255, 102, 153, 255, 153, 153, 255, 204, 153, 255, 255, 153, 255, 0, 204, 255, 51,
+    204, 255, 102, 204, 255, 153, 204, 255, 204, 204, 255, 255, 204, 255, 51, 255, 255, 102, 255,
+    204, 153, 255, 255, 204, 255, 255, 255, 102, 102, 102, 255, 102, 255, 255, 102, 102, 102, 255,
+    255, 102, 255, 102, 255, 255, 165, 0, 33, 95, 95, 95, 119, 119, 119, 134, 134, 134, 150, 150,
+    150, 203, 203, 203, 178, 178, 178, 215, 215, 215, 221, 221, 221, 227, 227, 227, 234, 234, 234,
+    241, 241, 241, 248, 248, 248, 255, 251, 240, 160, 160, 164, 128, 128, 128, 255, 0, 0, 0, 255,
+    0, 255, 255, 0, 0, 0, 255, 255, 0, 255, 0, 255, 255, 255, 255, 255,
+];
+
+/// The standard Windows 256-color palette used for `MNAK` bitmap cels.
+fn bitmap_palette() -> Vec<Color> {
+    (0..256)
+        .map(|i| Color {
+            r: HALFTONE_RGB[i * 3],
+            g: HALFTONE_RGB[i * 3 + 1],
+            b: HALFTONE_RGB[i * 3 + 2],
+        })
+        .collect()
+}
+
+/// Decode Actor's 8bpp run-length scheme to `expected` bytes: control byte `c` — when
+/// `c < 0x80`, repeat the following byte `c` times; otherwise copy the next `c & 0x7f` bytes
+/// literally. Output is clamped to `expected` (short/garbled input just stops early).
+fn decode_rle8(src: &[u8], expected: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(expected);
+    let mut i = 0;
+    while i < src.len() && out.len() < expected {
+        let c = src[i];
+        i += 1;
+        if c < 0x80 {
+            let Some(&v) = src.get(i) else { break };
+            i += 1;
+            for _ in 0..c {
+                if out.len() >= expected {
+                    break;
+                }
+                out.push(v);
+            }
+        } else {
+            for _ in 0..(c & 0x7f) {
+                let Some(&v) = src.get(i) else { break };
+                i += 1;
+                if out.len() >= expected {
+                    break;
+                }
+                out.push(v);
+            }
+        }
+    }
+    out.resize(expected, ACTOR_TRANSPARENT_INDEX);
+    out
+}
+
 /// How a cel's artwork is encoded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CelFormat {
     /// Aldus Placeable Windows Metafile (vector). Rasterized by [`ActFile::render_cel`].
     Wmf,
-    /// Compressed bitmap form used by some newer PC characters (not yet decoded).
+    /// Compressed 8bpp raster (an `MNAK` sub-image). Rasterized by [`ActFile::render_cel`].
     Bitmap,
     /// The classic-Mac artwork codec (not yet decoded).
     MacBitmap,
@@ -71,6 +162,9 @@ pub struct Cel {
     /// `None` for non-WMF cels. Cels share one logical space, so these positions are how
     /// parts (eyes, mouths) line up over a body when composited.
     pub bounds: Option<(i16, i16, i16, i16)>,
+    /// For [`CelFormat::Bitmap`] cels, which sub-image within the `MNAK` block at `offset`
+    /// this cel is (one block packs several). Always `0` for other formats.
+    pub sub: u16,
 }
 
 /// One layered part of a pose: an image cel placed at a destination rectangle.
@@ -343,13 +437,14 @@ impl ActFile {
                 offset: start,
                 len: end - start,
                 bounds,
+                sub: 0,
             });
         }
 
-        // Newer PC characters (e.g. The Genius) store no WMF cels; instead each cel is an
-        // LZ-compressed block tagged "MNAK". The compression is the very same bitstream as
-        // ACS, so we enumerate the blocks and can decompress them (see `decompress_cel`) —
-        // though the decompressed cel *body* is a further encoding we don't rasterize yet.
+        // Newer PC characters (e.g. The Genius) store no WMF cels; instead the artwork is a
+        // run of LZ-compressed blocks tagged "MNAK", each packing several sub-images (the
+        // header's `count`). The compression is the very same bitstream as ACS. We enumerate
+        // every sub-image as its own cel so each animation image is individually rasterizable.
         if cels.is_empty() && !big_endian {
             let mut from = 0usize;
             let mut starts = Vec::new();
@@ -359,12 +454,21 @@ impl ActFile {
             }
             for (i, &start) in starts.iter().enumerate() {
                 let end = starts.get(i + 1).copied().unwrap_or(art_end);
-                cels.push(Cel {
-                    format: CelFormat::Bitmap,
-                    offset: start,
-                    len: end - start,
-                    bounds: None,
-                });
+                // MNAK header: tag(4), u32 uncompressed size, u32 sub-image count.
+                let count = data
+                    .get(start + 8..start + 12)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .unwrap_or(1)
+                    .max(1);
+                for sub in 0..count as u16 {
+                    cels.push(Cel {
+                        format: CelFormat::Bitmap,
+                        offset: start,
+                        len: end - start,
+                        bounds: None,
+                        sub,
+                    });
+                }
             }
         }
 
@@ -417,33 +521,97 @@ impl ActFile {
         self.data.get(cel.offset..cel.offset + cel.len)
     }
 
-    /// Decompress a [`CelFormat::Bitmap`] (`MNAK`) cel to its raw bytes.
+    /// Decompress the whole `MNAK` block backing a [`CelFormat::Bitmap`] cel to its raw bytes.
     ///
-    /// The compression is the same LZ77 bitstream as ACS. The decoded buffer starts with a
-    /// small header — `u32 width`, `u32 height`, `u32` (flag) — followed by a cel body whose
-    /// pixel encoding is **not yet decoded**, so these cels can't be rasterized
-    /// ([`render_cel`](Self::render_cel) returns `None` for them). Exposed so the raw
-    /// decoded bytes are available for further reverse-engineering. Returns `None` for
-    /// non-`MNAK` cels or if decompression fails.
+    /// The compression is the same LZ77 bitstream as ACS. The decoded buffer is the block's
+    /// concatenated sub-images, each `u32 width`, `u32 height`, `u32 flags`, then a
+    /// run-length-encoded 8bpp raster. All cels sharing one block return the same buffer;
+    /// use [`decode_bitmap_cel`](Self::decode_bitmap_cel) for a single sub-image's pixels, or
+    /// [`render_cel`](Self::render_cel) to rasterize it. Returns `None` for non-`MNAK` cels or
+    /// if decompression fails.
     pub fn decompress_cel(&self, index: usize) -> Option<Vec<u8>> {
         let cel = self.cels.get(index)?;
         if cel.format != CelFormat::Bitmap {
             return None;
         }
         let block = self.data.get(cel.offset..cel.offset + cel.len)?;
-        if block.len() < 24 || &block[0..4] != b"MNAK" {
+        if block.len() < 12 || &block[0..4] != b"MNAK" {
             return None;
         }
-        // MNAK header: tag(4), u32 uncompressed size, u32 count, 3× u32 segment offsets.
+        // MNAK header: tag(4), u32 uncompressed size, u32 sub-image count, then (count-1)
+        // u32 body offsets, then the LZ payload.
         let size = u32::from_le_bytes([block[4], block[5], block[6], block[7]]) as usize;
-        crate::decode::decode_data(&block[24..], size).ok()
+        let count = u32::from_le_bytes([block[8], block[9], block[10], block[11]]).max(1) as usize;
+        let payload = 12 + (count - 1) * 4;
+        crate::decode::decode_data(block.get(payload..)?, size).ok()
     }
 
-    /// Rasterize cel `index` to top-down RGBA. Returns `None` for non-WMF cels or if the
-    /// metafile cannot be interpreted. The image is sized to the cel's bounding box; use
-    /// [`Cel::bounds`] to position it within a composited frame.
+    /// Decode a single [`CelFormat::Bitmap`] cel to `(width, height, indices)`: an 8bpp raster
+    /// in top-down row order. Index [`ACTOR_TRANSPARENT_INDEX`] is the transparent color key.
+    /// Returns `None` for non-bitmap cels or on any decode failure.
+    pub fn decode_bitmap_cel(&self, index: usize) -> Option<(u32, u32, Vec<u8>)> {
+        let cel = self.cels.get(index)?;
+        if cel.format != CelFormat::Bitmap {
+            return None;
+        }
+        let block = self.data.get(cel.offset..cel.offset + cel.len)?;
+        if block.len() < 12 || &block[0..4] != b"MNAK" {
+            return None;
+        }
+        let count = u32::from_le_bytes([block[8], block[9], block[10], block[11]]).max(1) as usize;
+        let body = self.decompress_cel(index)?;
+        // Sub-image `s` body range: [0, off[0], off[1], …, off[count-2], body.len()].
+        let sub = cel.sub as usize;
+        let sub_start = if sub == 0 {
+            0
+        } else {
+            let o = 12 + (sub - 1) * 4;
+            u32::from_le_bytes([block[o], block[o + 1], block[o + 2], block[o + 3]]) as usize
+        };
+        let sub_end = if sub + 1 < count {
+            let o = 12 + sub * 4;
+            u32::from_le_bytes([block[o], block[o + 1], block[o + 2], block[o + 3]]) as usize
+        } else {
+            body.len()
+        };
+        let seg = body.get(sub_start..sub_end)?;
+        if seg.len() < 12 {
+            return None;
+        }
+        let w = u32::from_le_bytes([seg[0], seg[1], seg[2], seg[3]]);
+        let h = u32::from_le_bytes([seg[4], seg[5], seg[6], seg[7]]);
+        let n = (w as usize).checked_mul(h as usize)?;
+        if n == 0 || n > (1 << 24) {
+            return None;
+        }
+        // Bottom-up 8bpp RLE: control byte `c` — `c < 0x80` repeats the next byte `c` times;
+        // `c >= 0x80` copies the next `c & 0x7f` bytes literally.
+        let rows = decode_rle8(&seg[12..], n);
+        // Flip to top-down.
+        let (w, h) = (w as usize, h as usize);
+        let mut top = vec![ACTOR_TRANSPARENT_INDEX; n];
+        for y in 0..h {
+            let src = &rows[(h - 1 - y) * w..(h - y) * w];
+            top[y * w..(y + 1) * w].copy_from_slice(src);
+        }
+        Some((w as u32, h as u32, top))
+    }
+
+    /// Rasterize cel `index` to top-down RGBA. WMF cels are rendered from their metafile
+    /// (sized to the cel's bounding box); [`CelFormat::Bitmap`] cels are RLE-decoded and
+    /// colored with the standard Windows palette. Returns `None` for undecodable cels.
     pub fn render_cel(&self, index: usize) -> Option<Rgba> {
         let cel = self.cels.get(index)?;
+        if cel.format == CelFormat::Bitmap {
+            let (w, h, indices) = self.decode_bitmap_cel(index)?;
+            let img = Indexed {
+                width: w,
+                height: h,
+                indices,
+                transparent: ACTOR_TRANSPARENT_INDEX,
+            };
+            return Some(img.to_rgba(&bitmap_palette()));
+        }
         if cel.format != CelFormat::Wmf {
             return None;
         }
