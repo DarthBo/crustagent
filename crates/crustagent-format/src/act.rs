@@ -89,38 +89,42 @@ pub struct Pose {
     pub parts: Vec<Part>,
 }
 
-/// How an animation frame proceeds after its pose is shown.
+/// One probabilistic branch target of a frame: jump to `target` with likelihood
+/// `weight / 65536`. A frame's lone branch with `weight == 0` is an unconditional jump.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Branch {
-    /// Advance to the next frame in order.
-    Next,
-    /// Unconditional jump to another frame index.
-    Jump(u16),
-    /// Branch to a frame with a probability weight (`0..=100`-ish).
-    Probable { target: u16, weight: u16 },
+pub struct Branch {
+    pub target: u16,
+    pub weight: u16,
 }
 
-/// One animation frame: show an object for a duration, then follow its [`Branch`].
-#[derive(Clone, Copy, Debug)]
+/// One animation frame: show an object for a duration, then either advance to the next
+/// frame or take one of its [`branches`](AnimFrame::branches).
+#[derive(Clone, Debug)]
 pub struct AnimFrame {
     /// Object index: `< cels.len()` is a bare image cel; otherwise a pose at
     /// `poses[object - cels.len()]`. Render with [`ActFile::render_object`].
     pub object: u16,
     /// On-screen time in milliseconds.
     pub duration_ms: u16,
-    pub branch: Branch,
+    /// Probabilistic branch targets. Empty ⇒ advance to the next frame; the leftover
+    /// probability (when weights sum to < 65536) also means "advance".
+    pub branches: Vec<Branch>,
+    /// This is an animation's terminal (return/exit) frame: after it, playback returns to
+    /// rest rather than flowing into the following frame (which belongs to another action).
+    pub exit: bool,
 }
 
 /// A named animation (e.g. `"Greeting"`, `"Thinking"`), referenced by the classic
-/// Microsoft Actor action id. `first_frame` indexes [`ActFile::frames`]; playback follows
-/// each frame's [`Branch`] from there.
+/// Microsoft Actor action id. Playback starts at `first_frame` and follows the frame graph
+/// until an exit frame — see [`ActFile::action_sequence`].
 #[derive(Clone, Debug)]
 pub struct Action {
     /// Microsoft Actor action id (1 = Idle, 2 = Greeting, 24 = Thinking, …).
     pub id: u16,
     /// Human-readable name for `id`, or `"Action{id}"` if unknown.
     pub name: String,
-    /// Number of consecutive frame-list entries (usually 1).
+    /// Primary-segment frame count from the directory (a hint; the animation actually runs
+    /// until an exit frame, which may be longer).
     pub count: u16,
     /// Starting index into [`ActFile::frames`].
     pub first_frame: u16,
@@ -491,32 +495,68 @@ impl ActFile {
     }
 
     /// Resolve an action to a linear list of `(object, duration_ms)` steps by walking the
-    /// frame graph from its start frame — advancing, jumping, or taking branches — with a
-    /// visit cap so loops terminate. This is the ACT analogue of the ACS sequencer.
-    pub fn action_sequence(&self, action: &Action, max_steps: usize) -> Vec<(u16, u16)> {
+    /// frame graph from its start frame. At each frame it advances, or takes a weighted
+    /// branch — like the ACS sequencer. `seed` makes the probabilistic choices reproducible;
+    /// `max_steps` bounds looping animations for a finite preview.
+    pub fn action_sequence_seeded(
+        &self,
+        action: &Action,
+        max_steps: usize,
+        seed: u64,
+    ) -> Vec<(u16, u16)> {
         let mut out = Vec::new();
-        let mut visits = std::collections::HashMap::new();
+        let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            // SplitMix64 step → a 16-bit roll.
+            rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = rng;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) & 0xFFFF) as u32
+        };
         let mut i = action.first_frame as usize;
-        while out.len() < max_steps {
+        let mut steps = 0usize;
+        while out.len() < max_steps && steps < max_steps * 4 {
+            steps += 1;
             let Some(frame) = self.frames.get(i) else {
                 break;
             };
-            *visits.entry(i).or_insert(0u32) += 1;
-            if visits[&i] > 3 {
-                break; // looped enough for a preview
-            }
-            // Zero-duration frames are instantaneous routing nodes (e.g. a branch hub) — walk
-            // through them without displaying, so they don't flash on screen.
+            // Zero-duration frames are instantaneous routing nodes — walk through without
+            // displaying so they don't flash on screen.
             if frame.duration_ms > 0 {
                 out.push((frame.object, frame.duration_ms));
             }
-            i = match frame.branch {
-                Branch::Next => i + 1,
-                Branch::Jump(t) => t as usize,
-                Branch::Probable { target, .. } => target as usize,
+            // An exit (return) frame ends this action's animation — stop rather than flow
+            // into the next action's frames.
+            if frame.exit {
+                break;
+            }
+            let total: u32 = frame.branches.iter().map(|b| b.weight as u32).sum();
+            i = if frame.branches.is_empty() {
+                i + 1
+            } else if total == 0 {
+                frame.branches[0].target as usize // unconditional jump
+            } else {
+                // Weighted pick; the leftover probability means "advance".
+                let roll = next();
+                let mut acc = 0u32;
+                let mut chosen = None;
+                for b in &frame.branches {
+                    acc += b.weight as u32;
+                    if roll < acc {
+                        chosen = Some(b.target as usize);
+                        break;
+                    }
+                }
+                chosen.unwrap_or(i + 1)
             };
         }
         out
+    }
+
+    /// [`action_sequence_seeded`](Self::action_sequence_seeded) with a fixed seed.
+    pub fn action_sequence(&self, action: &Action, max_steps: usize) -> Vec<(u16, u16)> {
+        self.action_sequence_seeded(action, max_steps, 0x1234_5678)
     }
 }
 
@@ -712,21 +752,27 @@ fn parse_anim_tables(
             if bt > 2 {
                 return None; // not the frame stream (or wrong start)
             }
-            let branch = match bt {
-                1 => Branch::Jump(r.u16(p)),
-                2 => Branch::Probable {
-                    target: r.u16(p),
-                    weight: r.u16(p + 2),
-                },
-                _ => Branch::Next,
-            };
+            // Branches (when bt != 0) are a linked list: each is (target, weight, continue),
+            // read until a `continue` word of 0 ends the chain.
+            let mut branches = Vec::new();
             if bt != 0 {
-                p += 6;
+                for _ in 0..8 {
+                    branches.push(Branch {
+                        target: r.u16(p),
+                        weight: r.u16(p + 2),
+                    });
+                    let cont = r.u16(p + 4);
+                    p += 6;
+                    if cont == 0 {
+                        break;
+                    }
+                }
             }
             fr.push(AnimFrame {
                 object,
                 duration_ms,
-                branch,
+                branches,
+                exit: bt == 1,
             });
         }
         // Accept when the walk consumed the section (the last marker leaves a few bytes).
