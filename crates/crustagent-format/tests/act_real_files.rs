@@ -74,6 +74,20 @@ fn parses_and_renders_actor_files() {
             assert!(rendered > 0, "{}: no WMF cel rendered", path.display());
         }
 
+        // Compressed (MNAK) bitmap cels must decompress to their declared size, with a
+        // sane width/height header (we can't rasterize the body yet, but the LZ layer works).
+        if act.image_format == CelFormat::Bitmap {
+            let out = act.decompress_cel(0).expect("decompress MNAK cel 0");
+            assert!(out.len() >= 12, "{}: tiny decode", path.display());
+            let w = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+            let h = u32::from_le_bytes([out[4], out[5], out[6], out[7]]);
+            assert!(
+                (1..=4096).contains(&w) && (1..=4096).contains(&h),
+                "{}: implausible MNAK cel size {w}x{h}",
+                path.display()
+            );
+        }
+
         // Any extracted sound is a complete RIFF/WAVE stream.
         for (i, snd) in act.sounds.iter().enumerate() {
             assert!(

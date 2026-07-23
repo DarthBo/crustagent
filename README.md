@@ -107,10 +107,11 @@ Implemented:
   Office 97/98 Assistants — Clippit, Rover, The Genius — and Microsoft Bob), in both the
   little-endian PC and big-endian classic-Mac byte orders. Parses the container (identity,
   palette, embedded WAV sounds) and **rasterizes the vector metafile (WMF) cels to RGBA**.
-  The newer compressed-bitmap (The Genius) and classic-Mac artwork codecs are not decoded
-  yet — those files still parse and report their artwork format.
+  The newer compressed-bitmap cels (The Genius, tagged `MNAK`) **decompress** with the same
+  LZ77 as ACS, but their decompressed pixel body — and the classic-Mac artwork codec — aren't
+  decoded to pixels yet; those files still parse and report their artwork format.
 
-Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the ACT bitmap/Mac
+Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the ACT bitmap-body/Mac
 artwork codecs and animation/state tables, and a small set of files with an
 obfuscated/variant 2.0 char-info block. Run the `sweep` example to audit a character
 library against the parser.

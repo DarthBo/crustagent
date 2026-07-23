@@ -18,10 +18,14 @@
 //!
 //! Cels are stored in one of a few forms. This module fully supports the common PC form:
 //! each cel is an **Aldus Placeable Windows Metafile** (a vector drawing — filled polygons
-//! with pen/brush colors) which [`ActFile::render_cel`] rasterizes to [`Rgba`]. The
-//! newer compressed bitmap form (The Genius) and the classic-Mac artwork codec are not yet
-//! decoded; those files still parse (identity, palette, sounds) and report their cels via
-//! [`CelFormat`].
+//! with pen/brush colors) which [`ActFile::render_cel`] rasterizes to [`Rgba`].
+//!
+//! Newer PC characters (e.g. The Genius) instead store each cel as an LZ-compressed block
+//! tagged `MNAK` — the compression is the same bitstream as ACS, so [`ActFile::decompress_cel`]
+//! recovers the raw bytes, but the decompressed cel *body* is a further encoding that isn't
+//! decoded yet (so those cels can't be rasterized). The classic-Mac artwork codec is a
+//! different, still-undecoded form. In all cases the container still parses (identity,
+//! palette, sounds) and reports each cel's encoding via [`CelFormat`].
 //!
 //! ```no_run
 //! use crustagent_format::act::ActFile;
@@ -233,15 +237,35 @@ impl ActFile {
             });
         }
 
-        // If no WMF cels were found the artwork uses a compressed form we do not decode
-        // yet (newer PC bitmap characters, or the classic-Mac codec). The container still
-        // parses; callers can see the encoding via `image_format`.
-        let image_format = if !cels.is_empty() {
-            CelFormat::Wmf
-        } else if big_endian {
-            CelFormat::MacBitmap
-        } else {
-            CelFormat::Bitmap
+        // Newer PC characters (e.g. The Genius) store no WMF cels; instead each cel is an
+        // LZ-compressed block tagged "MNAK". The compression is the very same bitstream as
+        // ACS, so we enumerate the blocks and can decompress them (see `decompress_cel`) —
+        // though the decompressed cel *body* is a further encoding we don't rasterize yet.
+        if cels.is_empty() && !big_endian {
+            let mut from = 0usize;
+            let mut starts = Vec::new();
+            while let Some(rel) = find_subslice(&data[from..art_end.min(data.len())], b"MNAK") {
+                starts.push(from + rel);
+                from += rel + 4;
+            }
+            for (i, &start) in starts.iter().enumerate() {
+                let end = starts.get(i + 1).copied().unwrap_or(art_end);
+                cels.push(Cel {
+                    format: CelFormat::Bitmap,
+                    offset: start,
+                    len: end - start,
+                    bounds: None,
+                });
+            }
+        }
+
+        // The artwork encoding, from what was actually found. WMF is the only form we can
+        // rasterize; Bitmap (MNAK) can be decompressed but not yet rasterized; the
+        // classic-Mac codec isn't decoded at all.
+        let image_format = match cels.first().map(|c| c.format) {
+            Some(f) => f,
+            None if big_endian => CelFormat::MacBitmap,
+            None => CelFormat::Bitmap,
         };
 
         // Sounds: extract every complete RIFF/WAVE stream. (Big-endian Mac audio is stored
@@ -266,10 +290,33 @@ impl ActFile {
         })
     }
 
-    /// Raw bytes of cel `index` (the placeable-WMF stream for WMF cels).
+    /// Raw bytes of cel `index` (the placeable-WMF stream for WMF cels, or the `MNAK`
+    /// block for compressed bitmap cels).
     pub fn cel_bytes(&self, index: usize) -> Option<&[u8]> {
         let cel = self.cels.get(index)?;
         self.data.get(cel.offset..cel.offset + cel.len)
+    }
+
+    /// Decompress a [`CelFormat::Bitmap`] (`MNAK`) cel to its raw bytes.
+    ///
+    /// The compression is the same LZ77 bitstream as ACS. The decoded buffer starts with a
+    /// small header — `u32 width`, `u32 height`, `u32` (flag) — followed by a cel body whose
+    /// pixel encoding is **not yet decoded**, so these cels can't be rasterized
+    /// ([`render_cel`](Self::render_cel) returns `None` for them). Exposed so the raw
+    /// decoded bytes are available for further reverse-engineering. Returns `None` for
+    /// non-`MNAK` cels or if decompression fails.
+    pub fn decompress_cel(&self, index: usize) -> Option<Vec<u8>> {
+        let cel = self.cels.get(index)?;
+        if cel.format != CelFormat::Bitmap {
+            return None;
+        }
+        let block = self.data.get(cel.offset..cel.offset + cel.len)?;
+        if block.len() < 24 || &block[0..4] != b"MNAK" {
+            return None;
+        }
+        // MNAK header: tag(4), u32 uncompressed size, u32 count, 3× u32 segment offsets.
+        let size = u32::from_le_bytes([block[4], block[5], block[6], block[7]]) as usize;
+        crate::decode::decode_data(&block[24..], size).ok()
     }
 
     /// Rasterize cel `index` to top-down RGBA. Returns `None` for non-WMF cels or if the
