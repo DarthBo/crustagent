@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use crustagent::{Agent, BalloonKind, Request};
 use crustagent_balloon::{balloon_size, paint_into, BalloonPaint, Font};
+use crustagent_format::{act::CelFormat, ActFile, Rgba};
 use present::WgpuPresenter;
 
 use winit::application::ApplicationHandler;
@@ -663,9 +664,20 @@ fn main() {
 
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let Some(path) = positional.first().map(|s| (*s).clone()) else {
-        eprintln!("usage: crustagent-render <file.acs> [Animation] [--tts]");
+        eprintln!("usage: crustagent-render <file.acs|.act> [Animation] [--tts]");
         std::process::exit(2);
     };
+
+    // Microsoft Actor (.act) files have no decoded animation timeline yet, so they don't
+    // go through the Agent runtime — run a minimal viewer that flips through their cels.
+    if std::path::Path::new(&path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("act"))
+    {
+        run_act_viewer(&path, dry_run);
+        return;
+    }
+
     let mut agent = Agent::load(&path).unwrap_or_else(|e| {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
@@ -758,4 +770,145 @@ fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run");
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft Actor (.act) viewer: flips through the character's rendered cels.
+// ---------------------------------------------------------------------------
+
+/// Milliseconds each cel is shown for in the Actor cel viewer.
+const ACT_CEL_MS: u64 = 120;
+
+fn run_act_viewer(path: &str, dry_run: bool) {
+    let act = ActFile::open(path).unwrap_or_else(|e| {
+        eprintln!("parse {path}: {e}");
+        std::process::exit(1);
+    });
+    if act.image_format != CelFormat::Wmf {
+        eprintln!(
+            "{}: artwork is {:?}, which isn't decoded yet — nothing to show",
+            act.name, act.image_format
+        );
+        std::process::exit(1);
+    }
+    let cels: Vec<Rgba> = (0..act.cels.len())
+        .filter_map(|i| act.render_cel(i))
+        .collect();
+    if cels.is_empty() {
+        eprintln!("{}: no renderable cels", act.name);
+        std::process::exit(1);
+    }
+    let canvas = (
+        cels.iter().map(|c| c.width).max().unwrap(),
+        cels.iter().map(|c| c.height).max().unwrap(),
+    );
+    println!(
+        "Actor {}: cycling {} cels in a {}x{} window (@{}x)",
+        act.name,
+        cels.len(),
+        canvas.0 * SCALE as u32,
+        canvas.1 * SCALE as u32,
+        SCALE
+    );
+    if dry_run {
+        return;
+    }
+
+    let mut app = ActApp {
+        name: act.name,
+        cels,
+        canvas,
+        index: 0,
+        last_advance: Instant::now(),
+        window: None,
+        presenter: None,
+        scratch: Vec::new(),
+    };
+    let event_loop = EventLoop::new().expect("event loop");
+    event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop.run_app(&mut app).expect("run");
+}
+
+struct ActApp {
+    name: String,
+    cels: Vec<Rgba>,
+    /// Shared canvas (largest cel) in unscaled pixels.
+    canvas: (u32, u32),
+    index: usize,
+    last_advance: Instant,
+    window: Option<Arc<Window>>,
+    presenter: Option<WgpuPresenter>,
+    scratch: Vec<u8>,
+}
+
+impl ActApp {
+    /// Center the current cel (scaled by `SCALE`) on a `w`×`h` transparent buffer.
+    fn compose(&mut self, w: u32, h: u32) {
+        self.scratch.clear();
+        self.scratch.resize((w * h * 4) as usize, 0);
+        let img = &self.cels[self.index];
+        let (cw, ch) = (img.width as i32, img.height as i32);
+        let ox = (w as i32 - cw * SCALE) / 2;
+        let oy = (h as i32 - ch * SCALE) / 2;
+        let mut canvas = paint::Canvas::new(&mut self.scratch, w, h);
+        canvas.blit_scaled(&img.pixels, cw, ch, ox, oy, SCALE);
+    }
+}
+
+impl ApplicationHandler for ActApp {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let (cw, ch) = self.canvas;
+        let win = make_window(
+            el,
+            cw * SCALE as u32,
+            ch * SCALE as u32,
+            &format!("crustagent — {}", self.name),
+        );
+        self.presenter = Some(WgpuPresenter::new(win.clone()));
+        win.request_redraw();
+        self.window = Some(win);
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if matches!(
+                    event.physical_key,
+                    PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ)
+                ) {
+                    el.exit();
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                if let Some(win) = self.window.clone() {
+                    let s = win.inner_size();
+                    if s.width > 0 && s.height > 0 {
+                        self.compose(s.width, s.height);
+                        if let Some(p) = self.presenter.as_mut() {
+                            p.present(&self.scratch, s.width, s.height);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now.duration_since(self.last_advance) >= Duration::from_millis(ACT_CEL_MS) {
+            self.index = (self.index + 1) % self.cels.len();
+            self.last_advance = now;
+            if let Some(win) = self.window.as_ref() {
+                win.request_redraw();
+            }
+        }
+        el.set_control_flow(ControlFlow::WaitUntil(
+            now + Duration::from_millis(ACT_CEL_MS),
+        ));
+    }
 }

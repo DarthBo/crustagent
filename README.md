@@ -146,11 +146,13 @@ cargo run -p crustagent-format --example render   -- assets/agents/Merlin.acs Gr
 cargo run -p crustagent-core   --example sequence -- assets/agents/Merlin.acs Greet     # print the timeline
 cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs GetAttention  # gesture -> GIF
 cargo run -p crustagent-format --example act_dump -- assets/agents/ACT/clippit.act 0 clip.png # Actor cel -> PNG
+cargo run -p crustagent-core   --example act_gif  -- assets/agents/ACT/clippit.act clip.gif    # Actor cels -> GIF
 
 # See it on your desktop (transparent, always-on-top):
 cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles
 cargo run -p crustagent-render -- assets/agents/Merlin.acs --tts            # ...and audible (cross-platform TTS)
 cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention     # loop a specific gesture
+cargo run -p crustagent-render -- assets/agents/ACT/clippit.act             # Actor (.act): flip through its cels
 ```
 
 With no animation named, the character **idles** — escalating `IDLINGLEVEL` animations,
