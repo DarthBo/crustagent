@@ -78,8 +78,9 @@ pub struct Cel {
 pub struct Part {
     /// Index into [`ActFile::cels`].
     pub image: u16,
-    /// Destination rectangle `(left, top, right, bottom)` in twips (1/1440").
-    pub rect: (u16, u16, u16, u16),
+    /// Destination rectangle `(left, top, right, bottom)` in twips (1/1440"), signed —
+    /// parts can sit partly off the frame edge.
+    pub rect: (i16, i16, i16, i16),
 }
 
 /// A pose: a complete character image built by layering image parts (body, eyes, mouth…).
@@ -504,7 +505,11 @@ impl ActFile {
             if visits[&i] > 3 {
                 break; // looped enough for a preview
             }
-            out.push((frame.object, frame.duration_ms));
+            // Zero-duration frames are instantaneous routing nodes (e.g. a branch hub) — walk
+            // through them without displaying, so they don't flash on screen.
+            if frame.duration_ms > 0 {
+                out.push((frame.object, frame.duration_ms));
+            }
             i = match frame.branch {
                 Branch::Next => i + 1,
                 Branch::Jump(t) => t as usize,
@@ -667,7 +672,7 @@ fn parse_anim_tables(
             }
             parts.push(Part {
                 image: r.u16(po),
-                rect: (r.u16(po + 2), r.u16(po + 4), r.u16(po + 6), r.u16(po + 8)),
+                rect: (r.i16(po + 2), r.i16(po + 4), r.i16(po + 6), r.i16(po + 8)),
             });
         }
         poses.push(Pose { parts });
@@ -839,8 +844,6 @@ mod wmf {
         if w == 0 || h == 0 || w > 4096 || h > 4096 {
             return None;
         }
-        let (ox, oy) = (left.min(right), top.min(bottom));
-
         // Standard metafile header follows the 22-byte placeable header; its size field is
         // in words (always 9 words = 18 bytes here).
         let mut p = 22 + r.u16(22 + 2) as usize * 2;
@@ -849,6 +852,12 @@ mod wmf {
         let mut objects: Vec<Option<Obj>> = Vec::new();
         let mut brush: Option<[u8; 3]> = Some([0, 0, 0]);
         let mut winding = false;
+        // MM_ANISOTROPIC window→viewport mapping. Cels map their logical window (SETWINDOW*)
+        // onto the output bitmap; the window need not match the placeable bbox (e.g. eye
+        // cels draw in a 360×200 window scaled into a ~46×26 frame). Params are stored
+        // (y, x). Default is identity (logical == device).
+        let mut win_org = (0i32, 0i32);
+        let mut win_ext = (w as i32, h as i32);
 
         while p + 6 <= bytes.len() {
             let size = r.u32(p) as usize; // record size in 16-bit words
@@ -858,7 +867,8 @@ mod wmf {
             }
             let params = p + 6; // first parameter word
             match func {
-                META_SETWINDOWEXT | META_SETWINDOWORG => {} // handled via placeable bbox
+                META_SETWINDOWORG => win_org = (r.i16(params + 2) as i32, r.i16(params) as i32),
+                META_SETWINDOWEXT => win_ext = (r.i16(params + 2) as i32, r.i16(params) as i32),
                 META_SETPOLYFILLMODE => winding = r.u16(params) == 2,
                 META_CREATEPENINDIRECT => insert_object(&mut objects, Obj::Pen),
                 META_CREATEBRUSHINDIRECT => {
@@ -891,7 +901,7 @@ mod wmf {
                 META_POLYGON => {
                     if let Some(color) = brush {
                         let n = r.u16(params) as usize;
-                        let pts = read_points(&r, params + 2, n, ox, oy);
+                        let pts = read_points(&r, params + 2, n, win_org, win_ext, w, h);
                         fill_polygon(&mut px, w, h, &pts, color, winding);
                     }
                 }
@@ -904,7 +914,7 @@ mod wmf {
                         }
                         let mut pp = params + 2 + count * 2;
                         for c in counts {
-                            let pts = read_points(&r, pp, c, ox, oy);
+                            let pts = read_points(&r, pp, c, win_org, win_ext, w, h);
                             fill_polygon(&mut px, w, h, &pts, color, winding);
                             pp += c * 4;
                         }
@@ -932,11 +942,24 @@ mod wmf {
         }
     }
 
-    fn read_points(r: &R, base: usize, n: usize, ox: i16, oy: i16) -> Vec<(i32, i32)> {
+    /// Read `n` polygon points, mapping each from the metafile's logical window
+    /// (`win_org`/`win_ext`) onto the `w`×`h` output bitmap (MM_ANISOTROPIC viewport).
+    fn read_points(
+        r: &R,
+        base: usize,
+        n: usize,
+        win_org: (i32, i32),
+        win_ext: (i32, i32),
+        w: usize,
+        h: usize,
+    ) -> Vec<(i32, i32)> {
+        let (ex, ey) = (win_ext.0, win_ext.1);
         let mut pts = Vec::with_capacity(n);
         for k in 0..n {
-            let x = r.i16(base + k * 4) as i32 - ox as i32;
-            let y = r.i16(base + k * 4 + 2) as i32 - oy as i32;
+            let lx = r.i16(base + k * 4) as i32 - win_org.0;
+            let ly = r.i16(base + k * 4 + 2) as i32 - win_org.1;
+            let x = if ex != 0 { lx * w as i32 / ex } else { lx };
+            let y = if ey != 0 { ly * h as i32 / ey } else { ly };
             pts.push((x, y));
         }
         pts

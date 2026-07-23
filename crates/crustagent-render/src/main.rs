@@ -773,7 +773,8 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// Microsoft Actor (.act) viewer: flips through the character's rendered cels.
+// Microsoft Actor (.act) viewer: plays a named action (composited poses), with
+// left-drag to move and right-click to cycle actions.
 // ---------------------------------------------------------------------------
 
 fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
@@ -792,59 +793,43 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         eprintln!("{}: no renderable cels", act.name);
         std::process::exit(1);
     }
-
-    // Pick an action: the requested one, else Idle, else the first. Walk its frame graph
-    // and composite each frame's pose. If there are no actions, flip through the cels.
-    let action = action_name
-        .and_then(|n| act.action(n))
-        .or_else(|| act.action("Idle"))
-        .or_else(|| act.actions.first());
-    let frames: Vec<(Rgba, u64)> = match action {
-        Some(a) => {
-            let seq = act.action_sequence(a, 300);
-            println!(
-                "Actor {}: playing {:?} ({} frames)",
-                act.name,
-                a.name,
-                seq.len()
-            );
-            seq.iter()
-                .filter_map(|&(obj, dur)| {
-                    act.render_object(obj as usize)
-                        .map(|img| (img, (dur as u64).max(40)))
-                })
-                .collect()
-        }
-        None => {
-            println!(
-                "Actor {}: no actions — cycling {} cels",
-                act.name,
-                act.cels.len()
-            );
-            (0..act.cels.len())
-                .filter_map(|i| act.render_cel(i).map(|img| (img, 120u64)))
-                .collect()
-        }
-    };
-    if frames.is_empty() {
-        eprintln!("{}: nothing to render", act.name);
+    if act.actions.is_empty() {
+        eprintln!("{}: no animations to play", act.name);
         std::process::exit(1);
     }
-    let canvas = (act.image_size.0 as u32, act.image_size.1 as u32);
+
+    // Start on the requested action, else Idle, else the first.
+    let start = action_name
+        .and_then(|n| {
+            act.actions
+                .iter()
+                .position(|a| a.name.eq_ignore_ascii_case(n))
+        })
+        .or_else(|| act.actions.iter().position(|a| a.name == "Idle"))
+        .unwrap_or(0);
+    println!(
+        "Actor {}: {} actions. Left-drag to move, right-click to cycle, Esc/Q to quit.",
+        act.name,
+        act.actions.len()
+    );
     if dry_run {
+        let seq = act.action_sequence(&act.actions[start], 300);
         println!(
-            "  {} frame(s) in a {}x{} window (@{}x)",
-            frames.len(),
-            canvas.0 * SCALE as u32,
-            canvas.1 * SCALE as u32,
+            "  {:?}: {} frame(s) in a {}x{} window (@{}x)",
+            act.actions[start].name,
+            seq.len(),
+            act.image_size.0 * SCALE as u16,
+            act.image_size.1 * SCALE as u16,
             SCALE
         );
         return;
     }
 
+    let canvas = (act.image_size.0 as u32, act.image_size.1 as u32);
     let mut app = ActApp {
-        name: act.name,
-        frames,
+        act,
+        action: start,
+        frames: Vec::new(),
         canvas,
         index: 0,
         last_advance: Instant::now(),
@@ -852,16 +837,17 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         presenter: None,
         scratch: Vec::new(),
     };
+    app.load_action(start);
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run");
 }
 
 struct ActApp {
-    name: String,
-    /// Composited animation frames, each with its on-screen duration in ms.
+    act: ActFile,
+    action: usize,
+    /// Composited frames of the current action, each with its on-screen duration (ms).
     frames: Vec<(Rgba, u64)>,
-    /// Character frame size in unscaled pixels.
     canvas: (u32, u32),
     index: usize,
     last_advance: Instant,
@@ -871,11 +857,36 @@ struct ActApp {
 }
 
 impl ActApp {
+    /// Resolve action `i` to its composited animation frames (skips empty results).
+    fn load_action(&mut self, i: usize) {
+        let seq = self.act.action_sequence(&self.act.actions[i], 300);
+        self.frames = seq
+            .iter()
+            .filter_map(|&(obj, dur)| {
+                self.act
+                    .render_object(obj as usize)
+                    .map(|img| (img, (dur as u64).max(40)))
+            })
+            .collect();
+        if self.frames.is_empty() {
+            // Fall back to a single rest cel so the window never goes empty.
+            if let Some(img) = self.act.render_cel(0) {
+                self.frames.push((img, 1000));
+            }
+        }
+        self.action = i;
+        self.index = 0;
+        self.last_advance = Instant::now();
+        println!("  playing {:?}", self.act.actions[i].name);
+    }
+
     /// Center the current frame (scaled by `SCALE`) on a `w`×`h` transparent buffer.
     fn compose(&mut self, w: u32, h: u32) {
         self.scratch.clear();
         self.scratch.resize((w * h * 4) as usize, 0);
-        let img = &self.frames[self.index].0;
+        let Some((img, _)) = self.frames.get(self.index) else {
+            return;
+        };
         let (cw, ch) = (img.width as i32, img.height as i32);
         let ox = (w as i32 - cw * SCALE) / 2;
         let oy = (h as i32 - ch * SCALE) / 2;
@@ -884,7 +895,7 @@ impl ActApp {
     }
 
     fn current_delay(&self) -> u64 {
-        self.frames[self.index].1
+        self.frames.get(self.index).map(|f| f.1).unwrap_or(100)
     }
 }
 
@@ -898,7 +909,7 @@ impl ApplicationHandler for ActApp {
             el,
             cw * SCALE as u32,
             ch * SCALE as u32,
-            &format!("crustagent — {}", self.name),
+            &format!("crustagent — {}", self.act.name),
         );
         self.presenter = Some(WgpuPresenter::new(win.clone()));
         win.request_redraw();
@@ -914,6 +925,29 @@ impl ApplicationHandler for ActApp {
                     PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ)
                 ) {
                     el.exit();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                match button {
+                    // Left-drag moves the window (OS-level drag).
+                    MouseButton::Left => {
+                        if let Some(win) = self.window.as_ref() {
+                            let _ = win.drag_window();
+                        }
+                    }
+                    // Right-click cycles to the next action.
+                    MouseButton::Right => {
+                        let next = (self.action + 1) % self.act.actions.len();
+                        self.load_action(next);
+                        if let Some(win) = self.window.as_ref() {
+                            win.request_redraw();
+                        }
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -935,14 +969,14 @@ impl ApplicationHandler for ActApp {
         let now = Instant::now();
         let delay = self.current_delay();
         if now.duration_since(self.last_advance) >= Duration::from_millis(delay) {
-            self.index = (self.index + 1) % self.frames.len(); // loop the animation
+            self.index = (self.index + 1) % self.frames.len().max(1); // loop the animation
             self.last_advance = now;
             if let Some(win) = self.window.as_ref() {
                 win.request_redraw();
             }
         }
         el.set_control_flow(ControlFlow::WaitUntil(
-            now + Duration::from_millis(self.current_delay().min(delay)),
+            now + Duration::from_millis(self.current_delay()),
         ));
     }
 }
