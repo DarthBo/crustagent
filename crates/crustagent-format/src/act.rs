@@ -898,11 +898,13 @@ mod wmf {
         let mut objects: Vec<Option<Obj>> = Vec::new();
         let mut brush: Option<[u8; 3]> = Some([0, 0, 0]);
         let mut winding = false;
-        // MM_ANISOTROPIC window→viewport mapping. Cels map their logical window (SETWINDOW*)
-        // onto the output bitmap; the window need not match the placeable bbox (e.g. eye
-        // cels draw in a 360×200 window scaled into a ~46×26 frame). Params are stored
-        // (y, x). Default is identity (logical == device).
-        let mut win_org = (0i32, 0i32);
+        // MM_ANISOTROPIC window→viewport mapping. Cels map their logical window onto the
+        // output bitmap. Default the window to the placeable bounding box, so cels that
+        // omit SETWINDOWORG/EXT (e.g. all the Actor 1.0 / Rover cels) still map their
+        // bbox-space polygon coordinates onto the frame. An explicit SETWINDOWORG/EXT
+        // overrides this (e.g. Clippit's eye cels draw in a 360×200 window scaled into a
+        // ~46×26 frame). Window params are stored (y, x).
+        let mut win_org = (left.min(right) as i32, top.min(bottom) as i32);
         let mut win_ext = (w as i32, h as i32);
 
         while p + 6 <= bytes.len() {
