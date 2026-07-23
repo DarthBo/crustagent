@@ -52,7 +52,10 @@ fn parses_and_renders_actor_files() {
         // match their bounds.
         let mut rendered = 0usize;
         for (i, cel) in act.cels.iter().enumerate() {
-            if !matches!(cel.format, CelFormat::Wmf | CelFormat::Bitmap) {
+            if !matches!(
+                cel.format,
+                CelFormat::Wmf | CelFormat::Bitmap | CelFormat::MacBitmap
+            ) {
                 continue;
             }
             if let Some(img) = act.render_cel(i) {
@@ -70,14 +73,22 @@ fn parses_and_renders_actor_files() {
             }
         }
 
-        // Every little-endian PC character (WMF or MNAK-bitmap) decodes the same animation
-        // tables: poses, named actions with frame programs, and playable Idle.
-        if act.image_format == CelFormat::Wmf || act.image_format == CelFormat::Bitmap {
+        // Every PC and Mac character decodes the same animation tables: named actions with
+        // frame programs, and a playable Idle that composites to a full character frame.
+        if matches!(
+            act.image_format,
+            CelFormat::Wmf | CelFormat::Bitmap | CelFormat::MacBitmap
+        ) {
             assert!(rendered > 0, "{}: no cel rendered", path.display());
             assert!(!act.actions.is_empty(), "{}: no actions", path.display());
             // Every action has at least one variant, and every variant is non-empty.
             for a in &act.actions {
-                assert!(!a.variants.is_empty(), "{}: {} no variants", path.display(), a.name);
+                assert!(
+                    !a.variants.is_empty(),
+                    "{}: {} no variants",
+                    path.display(),
+                    a.name
+                );
                 assert!(
                     a.variants.iter().all(|v| !v.ops.is_empty()),
                     "{}: {} empty variant",
@@ -134,6 +145,31 @@ fn parses_and_renders_actor_files() {
                 opaque > 50,
                 "{}: rendered MNAK cel 0 fully transparent",
                 path.display()
+            );
+        }
+
+        // Classic-Mac (SMC) characters must decode their cels to a plausibly-sized raster with
+        // a coherent (non-empty, non-total) painted region.
+        if act.image_format == CelFormat::MacBitmap {
+            assert!(rendered > 0, "{}: no Mac cel rendered", path.display());
+            let (w, h, indices) = act.decode_smc_cel(0).expect("decode SMC cel 0");
+            assert!(
+                (1..=4096).contains(&w) && (1..=4096).contains(&h),
+                "{}: implausible SMC cel size {w}x{h}",
+                path.display()
+            );
+            assert_eq!(
+                indices.len(),
+                (w * h) as usize,
+                "{}: SMC index count",
+                path.display()
+            );
+            let painted = indices.iter().filter(|&&i| i != 0).count();
+            assert!(
+                painted > 50 && painted < indices.len(),
+                "{}: SMC cel 0 not a coherent image ({painted}/{})",
+                path.display(),
+                indices.len()
             );
         }
 

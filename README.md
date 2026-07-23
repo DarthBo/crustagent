@@ -115,14 +115,15 @@ Implemented:
   format the original engine uses — both the vector (WMF: Clippit, Rover) and
   compressed-bitmap (The Genius) characters share it.
   The Genius's artwork is `MNAK`-tagged compressed bitmaps: each block LZ77-decompresses
-  (same bitstream as ACS) into several run-length-encoded 8bpp sub-images, which
-  [`ActFile::render_cel`] colors with the standard Windows palette. Only the classic-Mac
-  artwork codec is still undecoded (its container, object table and animations parse; the
-  compressed cel payload doesn't rasterize yet), so Mac characters have no rendered frames.
+  (same bitstream as ACS) into several run-length-encoded 8bpp sub-images. The classic-Mac
+  characters store their cels as **Apple QuickTime SMC** (`'smc '`) chunks, which
+  [`ActFile::render_cel`] also decodes. Both bitmap forms are colored with the standard
+  Windows palette as a placeholder — the characters' true per-character color tables live
+  outside the file (host-supplied), so custom-palette characters render with stand-in colors.
 
-Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the classic-Mac artwork
-codec, and a small set of files with an obfuscated/variant 2.0 char-info block. Run the
-`sweep` example to audit a character library against the parser.
+Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the external
+per-character color tables, and a small set of files with an obfuscated/variant 2.0
+char-info block. Run the `sweep` example to audit a character library against the parser.
 
 ## `crustagent-core` — status
 

@@ -139,6 +139,267 @@ fn decode_rle8(src: &[u8], expected: usize) -> Vec<u8> {
     out
 }
 
+/// The palette index left "unchanged" by an SMC skip opcode — the transparent/background key
+/// for the classic-Mac bitmaps (their real color table is an external QuickTime `clut`).
+const MAC_TRANSPARENT_INDEX: u8 = 0x00;
+
+/// Decode an Apple QuickTime **SMC** (`'smc '`) opcode stream to a top-down 8bpp raster of
+/// `w`×`h`. SMC works on 4×4-pixel blocks in raster-of-tiles order, keeping three round-robin
+/// color caches (pairs / quads / octets). `buf` is the chunk payload *after* the 4-byte
+/// flags+length header. Malformed input stops early. (Port of the reference SMC decoder.)
+fn decode_smc(buf: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let stride = w;
+    let hp = h.div_ceil(4) * 4;
+    let mut pix = vec![MAC_TRANSPARENT_INDEX; stride * hp];
+    let mut pair = [0u8; 512];
+    let mut quad = [0u8; 1024];
+    let mut octet = [0u8; 2048];
+    let (mut cpi, mut cqi, mut coi) = (0usize, 0usize, 0usize);
+    let mut total = (w.div_ceil(4) * h.div_ceil(4)) as i64;
+    let row_inc = (stride - 4) as i64;
+    let (mut row_ptr, mut pixel_ptr, mut gb) = (0i64, 0i64, 0usize);
+    let (sp, wi) = (stride as i64, w as i64);
+    // A byte from the stream (0 past the end), advancing the cursor.
+    macro_rules! next {
+        () => {{
+            let v = *buf.get(gb).unwrap_or(&0);
+            gb += 1;
+            v
+        }};
+    }
+    // Block count for the skip/repeat/1-color classes; move to the next 4×4 block.
+    macro_rules! blocks {
+        ($op:expr) => {
+            if $op & 0x10 != 0 {
+                next!() as i64 + 1
+            } else {
+                1 + ($op & 0x0F) as i64
+            }
+        };
+    }
+    macro_rules! advance {
+        () => {{
+            pixel_ptr += 4;
+            if pixel_ptr >= wi {
+                pixel_ptr = 0;
+                row_ptr += sp * 4;
+            }
+        }};
+    }
+    // Write a 4×4 block starting at pixel offset `dst`, sourcing each pixel via `$val`
+    // (an expression evaluated per pixel with the block-local index `i` in 0..16).
+    macro_rules! block {
+        ($dst:expr, |$i:ident| $val:expr) => {{
+            let mut b = $dst;
+            let mut $i = 0usize;
+            for _ in 0..4 {
+                for _ in 0..4 {
+                    let v = $val;
+                    put(&mut pix, b, v);
+                    b += 1;
+                    $i += 1;
+                }
+                b += row_inc;
+            }
+        }};
+    }
+    while total > 0 && gb < buf.len() {
+        let op = next!();
+        match op & 0xF0 {
+            0x00 | 0x10 => {
+                let mut n = blocks!(op);
+                while n > 0 {
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            0x20 | 0x30 => {
+                let mut n = blocks!(op);
+                while n > 0 {
+                    let prev = if pixel_ptr == 0 {
+                        row_ptr - wi * 4 + wi - 4
+                    } else {
+                        row_ptr + pixel_ptr - 4
+                    };
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |i| get(&pix, prev + (i % 4 + (i / 4) * stride) as i64));
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            0x40 | 0x50 => {
+                let mut n = blocks!(op) * 2;
+                let pbp1 = if pixel_ptr == 0 {
+                    row_ptr - wi * 4 + wi - 8
+                } else if pixel_ptr == 4 {
+                    row_ptr - wi * 4 + row_inc
+                } else {
+                    row_ptr + pixel_ptr - 8
+                };
+                let pbp2 = if pixel_ptr == 0 {
+                    row_ptr - wi * 4 + row_inc
+                } else {
+                    row_ptr + pixel_ptr - 4
+                };
+                let mut flag = false;
+                while n > 0 {
+                    let prev = if flag { pbp2 } else { pbp1 };
+                    flag = !flag;
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |i| get(&pix, prev + (i % 4 + (i / 4) * stride) as i64));
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            0x60 | 0x70 => {
+                let mut n = blocks!(op);
+                let val = next!();
+                let dst0 = row_ptr + pixel_ptr;
+                block!(dst0, |_i| val);
+                advance!();
+                total -= 1;
+                n -= 1;
+                while n > 0 {
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |_i| val);
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            0x80 | 0x90 => {
+                let mut n = (op & 0x0F) as i64 + 1;
+                let cti = if op & 0x10 == 0 {
+                    let t = 2 * cpi;
+                    pair[t] = next!();
+                    pair[t + 1] = next!();
+                    cpi = (cpi + 1) & 0xFF;
+                    t
+                } else {
+                    2 * next!() as usize
+                };
+                while n > 0 {
+                    let cf = read_u16(buf, gb);
+                    gb += 2;
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |i| pair[cti + ((cf >> (15 - i)) & 1) as usize]);
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            0xA0 | 0xB0 => {
+                let mut n = (op & 0x0F) as i64 + 1;
+                let cti = if op & 0x10 == 0 {
+                    let t = 4 * cqi;
+                    for k in 0..4 {
+                        quad[t + k] = next!();
+                    }
+                    cqi = (cqi + 1) & 0xFF;
+                    t
+                } else {
+                    4 * next!() as usize
+                };
+                while n > 0 {
+                    let cf = read_u32(buf, gb);
+                    gb += 4;
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |i| quad[cti + ((cf >> (30 - i * 2)) & 3) as usize]);
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            0xC0 | 0xD0 => {
+                let mut n = (op & 0x0F) as i64 + 1;
+                let cti = if op & 0x10 == 0 {
+                    let t = 8 * coi;
+                    for k in 0..8 {
+                        octet[t + k] = next!();
+                    }
+                    coi = (coi + 1) & 0xFF;
+                    t
+                } else {
+                    8 * next!() as usize
+                };
+                while n > 0 {
+                    let v1 = read_u16(buf, gb) as u32;
+                    let v2 = read_u16(buf, gb + 2) as u32;
+                    let v3 = read_u16(buf, gb + 4) as u32;
+                    gb += 6;
+                    // Two 24-bit flag words: rows 0-1 use `cfa`, rows 2-3 use `cfb`; 3 bits/px.
+                    let cfa = ((v1 & 0xFFF0) << 8) | (v2 >> 4);
+                    let cfb = ((v3 & 0xFFF0) << 8)
+                        | ((v1 & 0x0F) << 8)
+                        | ((v2 & 0x0F) << 4)
+                        | (v3 & 0x0F);
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |i| {
+                        let (cf, sh) = if i < 8 {
+                            (cfa, 21 - i * 3)
+                        } else {
+                            (cfb, 21 - (i - 8) * 3)
+                        };
+                        octet[cti + ((cf >> sh) & 7) as usize]
+                    });
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+            _ => {
+                // 0xE0/0xF0: raw — 16 literal indices per block.
+                let mut n = (op & 0x0F) as i64 + 1;
+                while n > 0 {
+                    let dst = row_ptr + pixel_ptr;
+                    block!(dst, |_i| next!());
+                    advance!();
+                    total -= 1;
+                    n -= 1;
+                }
+            }
+        }
+    }
+    // Crop the block-padded buffer to w×h (already top-down).
+    let mut out = vec![MAC_TRANSPARENT_INDEX; w * h];
+    for y in 0..h {
+        out[y * w..(y + 1) * w].copy_from_slice(&pix[y * stride..y * stride + w]);
+    }
+    out
+}
+
+#[inline]
+fn get(pix: &[u8], i: i64) -> u8 {
+    if i >= 0 && (i as usize) < pix.len() {
+        pix[i as usize]
+    } else {
+        MAC_TRANSPARENT_INDEX
+    }
+}
+
+#[inline]
+fn read_u16(b: &[u8], o: usize) -> u16 {
+    u16::from_be_bytes([*b.get(o).unwrap_or(&0), *b.get(o + 1).unwrap_or(&0)])
+}
+#[inline]
+fn read_u32(b: &[u8], o: usize) -> u32 {
+    u32::from_be_bytes([
+        *b.get(o).unwrap_or(&0),
+        *b.get(o + 1).unwrap_or(&0),
+        *b.get(o + 2).unwrap_or(&0),
+        *b.get(o + 3).unwrap_or(&0),
+    ])
+}
+#[inline]
+fn put(pix: &mut [u8], i: i64, v: u8) {
+    if i >= 0 && (i as usize) < pix.len() {
+        pix[i as usize] = v;
+    }
+}
+
 /// How a cel's artwork is encoded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CelFormat {
@@ -306,6 +567,9 @@ pub struct ActFile {
     pub sounds: Vec<Vec<u8>>,
     /// The seven section offsets from the header (artwork, sounds, tables, strings).
     pub sections: [u32; 7],
+    /// Pixel size of every classic-Mac SMC cel (from the QuickTime image description); `(0,0)`
+    /// for non-Mac files.
+    smc_size: (u16, u16),
     data: Vec<u8>,
 }
 
@@ -358,9 +622,19 @@ impl ActFile {
             m[2..].copy_from_slice(&r.pack16(2083));
             m
         };
+        // The two words before the marker are the pixel frame size. Windows stores them
+        // (width, height); the classic-Mac dialect uses QuickDraw order (height, width), so
+        // swap for big-endian to always yield (width, height).
         let image_size = find_subslice(&data[..data.len().min(0x200)], &marker)
             .filter(|&pos| pos >= 4)
-            .map(|pos| (r.u16(pos - 4), r.u16(pos - 2)))
+            .map(|pos| {
+                let (a, b) = (r.u16(pos - 4), r.u16(pos - 2));
+                if big_endian {
+                    (b, a)
+                } else {
+                    (a, b)
+                }
+            })
             .unwrap_or((0, 0));
 
         // Section table: seven ascending u32 offsets that end near EOF, preceded by a small
@@ -482,9 +756,52 @@ impl ActFile {
             }
         }
 
-        // The artwork encoding, from what was actually found. WMF is the only form we can
-        // rasterize; Bitmap (MNAK) can be decompressed but not yet rasterized; the
-        // classic-Mac codec isn't decoded at all.
+        // Classic-Mac characters: the artwork pool is a run of QuickTime SMC (`'smc '`)
+        // compressed cels, one per object-directory entry. Enumerate them from the object
+        // directory (big-endian pool offsets); pose entries (type word 0x14) are skipped and
+        // picked up as poses by `parse_animation`. Every cel's pixel size comes from the
+        // QuickTime image description, located by its `'smc '` codec tag.
+        let mut smc_size = (0u16, 0u16);
+        if cels.is_empty() && big_endian {
+            if let Some(id) = find_subslice(&data, b"smc ").map(|p| p.saturating_sub(4)) {
+                if id + 36 <= data.len() {
+                    smc_size = (r.u16(id + 32), r.u16(id + 34));
+                }
+            }
+            let body_base = r.u32(10) as usize;
+            let region = |f: usize| body_base + r.u32(body_base + f) as usize;
+            let art_base = region(0x26);
+            let (objdir_s, objdir_e) = (region(0x2a), region(0x2e));
+            if art_base <= data.len()
+                && objdir_e <= data.len()
+                && objdir_s < objdir_e
+                && art_base <= objdir_s
+            {
+                let mut offs: Vec<usize> = (objdir_s..objdir_e)
+                    .step_by(4)
+                    .map(|q| (r.u32(q) & 0x3FFF_FFFF) as usize)
+                    .collect();
+                offs.push(objdir_s - art_base); // pool end sentinel
+                offs.sort_unstable();
+                offs.dedup();
+                for w in offs.windows(2) {
+                    let (off, end) = (w[0], w[1]);
+                    let abs = art_base + off;
+                    if abs + 4 > data.len() || r.u16(abs) == 0x0014 {
+                        continue; // out of range, or a pose object (not a cel)
+                    }
+                    cels.push(Cel {
+                        format: CelFormat::MacBitmap,
+                        offset: abs,
+                        len: end - off,
+                        bounds: None,
+                        sub: 0,
+                    });
+                }
+            }
+        }
+
+        // The artwork encoding, from what was actually found.
         let image_format = match cels.first().map(|c| c.format) {
             Some(f) => f,
             None if big_endian => CelFormat::MacBitmap,
@@ -492,10 +809,9 @@ impl ActFile {
         };
 
         // Animation tables — the object table (index → cel/pose), poses, and named actions
-        // with their frame programs. Decoded for the little-endian PC characters (WMF and
-        // MNAK-bitmap alike; they share this format). The classic-Mac artwork isn't decoded
-        // to pixels, so its tables are skipped.
-        let (objects, poses, actions) = if !big_endian && !cels.is_empty() {
+        // with their frame programs. All PC and Mac characters share this format; only files
+        // whose cels we couldn't enumerate (unknown artwork) are skipped.
+        let (objects, poses, actions) = if !cels.is_empty() {
             parse_animation(&r, &cels, &sections)
         } else {
             (Vec::new(), Vec::new(), Vec::new())
@@ -522,6 +838,7 @@ impl ActFile {
             objects,
             sounds,
             sections,
+            smc_size,
             data,
         })
     }
@@ -611,26 +928,56 @@ impl ActFile {
         Some((w as u32, h as u32, top))
     }
 
-    /// Rasterize cel `index` to top-down RGBA. WMF cels are rendered from their metafile
-    /// (sized to the cel's bounding box); [`CelFormat::Bitmap`] cels are RLE-decoded and
-    /// colored with the standard Windows palette. Returns `None` for undecodable cels.
-    pub fn render_cel(&self, index: usize) -> Option<Rgba> {
+    /// Decode a [`CelFormat::MacBitmap`] cel (a QuickTime SMC chunk) to `(width, height,
+    /// indices)`: a top-down 8bpp raster. Index [`MAC_TRANSPARENT_INDEX`] is the transparent
+    /// key. Returns `None` for non-Mac cels or if the pixel size is unknown.
+    pub fn decode_smc_cel(&self, index: usize) -> Option<(u32, u32, Vec<u8>)> {
         let cel = self.cels.get(index)?;
-        if cel.format == CelFormat::Bitmap {
-            let (w, h, indices) = self.decode_bitmap_cel(index)?;
-            let img = Indexed {
-                width: w,
-                height: h,
-                indices,
-                transparent: ACTOR_TRANSPARENT_INDEX,
-            };
-            return Some(img.to_rgba(&bitmap_palette()));
-        }
-        if cel.format != CelFormat::Wmf {
+        if cel.format != CelFormat::MacBitmap {
             return None;
         }
-        let bytes = self.data.get(cel.offset..cel.offset + cel.len)?;
-        wmf::render(bytes, self.big_endian)
+        let (w, h) = (self.smc_size.0 as usize, self.smc_size.1 as usize);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        // Each cel is `[u8 flags][u24-BE length]` then the SMC opcode stream.
+        let chunk = self.data.get(cel.offset..cel.offset + cel.len)?;
+        let payload = chunk.get(4..)?;
+        Some((w as u32, h as u32, decode_smc(payload, w, h)))
+    }
+
+    /// Rasterize cel `index` to top-down RGBA. WMF cels are rendered from their metafile
+    /// (sized to the cel's bounding box); [`CelFormat::Bitmap`] cels are RLE-decoded and
+    /// [`CelFormat::MacBitmap`] cels are SMC-decoded, both colored with the standard Windows
+    /// palette (the characters' true color tables are external). Returns `None` if undecodable.
+    pub fn render_cel(&self, index: usize) -> Option<Rgba> {
+        let cel = self.cels.get(index)?;
+        match cel.format {
+            CelFormat::Bitmap => {
+                let (w, h, indices) = self.decode_bitmap_cel(index)?;
+                let img = Indexed {
+                    width: w,
+                    height: h,
+                    indices,
+                    transparent: ACTOR_TRANSPARENT_INDEX,
+                };
+                Some(img.to_rgba(&bitmap_palette()))
+            }
+            CelFormat::MacBitmap => {
+                let (w, h, indices) = self.decode_smc_cel(index)?;
+                let img = Indexed {
+                    width: w,
+                    height: h,
+                    indices,
+                    transparent: MAC_TRANSPARENT_INDEX,
+                };
+                Some(img.to_rgba(&bitmap_palette()))
+            }
+            CelFormat::Wmf => {
+                let bytes = self.data.get(cel.offset..cel.offset + cel.len)?;
+                wmf::render(bytes, self.big_endian)
+            }
+        }
     }
 
     /// Composite pose `index` (from [`ActFile::poses`]) into a full character frame, sized
@@ -865,24 +1212,34 @@ fn extract_wave_streams(data: &[u8]) -> Vec<Vec<u8>> {
 /// actually uses; the WMF (Clippit, Rover) and MNAK-bitmap (The Genius) PC characters share
 /// it. Region offsets come from the 70-byte char-info header at the body base (mirrored into
 /// `sections`, relative to that base); the artwork pool begins at the first cel.
-fn parse_animation(r: &Rdr, cels: &[Cel], sections: &[u32; 7]) -> (Vec<ObjRef>, Vec<Pose>, Vec<Action>) {
+fn parse_animation(
+    r: &Rdr,
+    cels: &[Cel],
+    sections: &[u32; 7],
+) -> (Vec<ObjRef>, Vec<Pose>, Vec<Action>) {
     let empty = || (Vec::new(), Vec::new(), Vec::new());
-    let art_base = cels[0].offset;
     // Header region fields are relative to the body base (the first outer section offset).
     let body_base = r.u32(10) as usize;
+    let art_base = body_base + r.u32(body_base + 0x26) as usize;
     let region = |i: usize| body_base + sections[i] as usize;
     let (objdir_s, objdir_e) = (region(0), region(1));
     let (frames_s, frames_e) = (region(3), region(4));
-    let (act_s, act_e) = (region(4), region(5));
+    let (mut act_s, act_e) = (region(4), region(5));
     let n = r.b.len();
     if objdir_e > n || frames_e > n || act_e > n || objdir_s >= objdir_e || act_s >= act_e {
         return empty();
+    }
+    // Classic-Mac files prepend a QuickTime image description (`u32 size`, then the `'smc '`
+    // codec tag) to the action region; step over it to reach the action table.
+    if r.b.get(act_s + 4..act_s + 8) == Some(b"smc ") {
+        act_s = (act_s + r.u32(act_s) as usize).min(act_e);
     }
 
     // Object directory: one u32 per object. Low 30 bits = byte offset into the artwork pool
     // (relative to `art_base`); top 2 bits = sub-image selector (for multi-image MNAK blocks).
     let nobj = (objdir_e - objdir_s) / 4;
-    let mut cel_at: std::collections::HashMap<(usize, u16), usize> = std::collections::HashMap::new();
+    let mut cel_at: std::collections::HashMap<(usize, u16), usize> =
+        std::collections::HashMap::new();
     for (i, c) in cels.iter().enumerate() {
         if let Some(off) = c.offset.checked_sub(art_base) {
             cel_at.entry((off, c.sub)).or_insert(i);
@@ -998,13 +1355,32 @@ fn parse_animation_blob(r: &Rdr, blob: usize, len: usize) -> Animation {
         let o = blob + 4 + k * 6;
         let (op, a, b) = (r.u16(o), r.u16(o + 2), r.u16(o + 4));
         ops.push(match op {
-            0 => Op::Show { object: a, duration_ms: b },
-            1 => Op::Branch { target: a, weight: b },
-            2 => Op::Sound { id: a, volume: (b & 0xff) as u8, pan: (b >> 8) as u8 },
-            3 => Op::LoopBranch { target: a, count: b },
-            4 => Op::StateBranch { target: a, state: b },
+            0 => Op::Show {
+                object: a,
+                duration_ms: b,
+            },
+            1 => Op::Branch {
+                target: a,
+                weight: b,
+            },
+            2 => Op::Sound {
+                id: a,
+                volume: (b & 0xff) as u8,
+                pan: (b >> 8) as u8,
+            },
+            3 => Op::LoopBranch {
+                target: a,
+                count: b,
+            },
+            4 => Op::StateBranch {
+                target: a,
+                state: b,
+            },
             // Unknown opcode: fall through (weight-0 branch keeps op indices aligned).
-            _ => Op::Branch { target: 0, weight: 0 },
+            _ => Op::Branch {
+                target: 0,
+                weight: 0,
+            },
         });
     }
     Animation { ops }

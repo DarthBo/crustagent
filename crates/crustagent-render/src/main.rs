@@ -782,7 +782,10 @@ fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
     });
-    if !matches!(act.image_format, CelFormat::Wmf | CelFormat::Bitmap) {
+    if !matches!(
+        act.image_format,
+        CelFormat::Wmf | CelFormat::Bitmap | CelFormat::MacBitmap
+    ) {
         eprintln!(
             "{}: artwork is {:?}, which isn't decoded yet — nothing to show",
             act.name, act.image_format

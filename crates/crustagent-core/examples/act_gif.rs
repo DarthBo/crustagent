@@ -26,7 +26,10 @@ fn main() {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
     });
-    if !matches!(act.image_format, CelFormat::Wmf | CelFormat::Bitmap) {
+    if !matches!(
+        act.image_format,
+        CelFormat::Wmf | CelFormat::Bitmap | CelFormat::MacBitmap
+    ) {
         eprintln!(
             "{}: artwork is {:?}, which isn't rasterized yet",
             act.name, act.image_format
