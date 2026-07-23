@@ -49,16 +49,18 @@ fn main() {
                 .or_else(|| act.action("Greeting"))
                 .or_else(|| act.actions.first())
                 .expect("actions non-empty");
-            let (cw, ch) = (act.image_size.0 as usize, act.image_size.1 as usize);
-            let seq = act.action_sequence(action, 200);
-            let frames = seq
-                .iter()
-                .filter_map(|&(obj, dur)| {
-                    act.render_object(obj as usize)
-                        .map(|img| (img, (dur / 10).max(2)))
-                })
+            // `animate` composites the frames (Mac SMC characters are inter-frame video, so
+            // each delta frame is drawn over the previous one).
+            let frames: Vec<(Rgba, u16)> = act
+                .animate(action, 200, 0x1234_5678)
+                .into_iter()
+                .map(|(img, dur)| (img, (dur / 10).max(2)))
                 .collect();
-            println!("action {:?}: {} frame(s)", action.name, seq.len());
+            let (cw, ch) = frames
+                .first()
+                .map(|(f, _)| (f.width as usize, f.height as usize))
+                .unwrap_or((act.image_size.0 as usize, act.image_size.1 as usize));
+            println!("action {:?}: {} frame(s)", action.name, frames.len());
             (cw, ch, frames)
         };
 

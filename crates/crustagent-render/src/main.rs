@@ -887,14 +887,12 @@ impl ActApp {
                 .filter_map(|c| self.act.render_cel(c).map(|img| (img, 80u64)))
                 .collect();
         } else {
-            let seq = self.act.action_sequence(&self.act.actions[i], 300);
-            self.frames = seq
-                .iter()
-                .filter_map(|&(obj, dur)| {
-                    self.act
-                        .render_object(obj as usize)
-                        .map(|img| (img, (dur as u64).max(40)))
-                })
+            // `animate` composites frames (Mac SMC characters are inter-frame video).
+            self.frames = self
+                .act
+                .animate(&self.act.actions[i], 300, 0x1234_5678)
+                .into_iter()
+                .map(|(img, dur)| (img, (dur as u64).max(40)))
                 .collect();
         }
         if self.frames.is_empty() {

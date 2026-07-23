@@ -171,14 +171,15 @@ fn decode_rle8(src: &[u8], expected: usize) -> Vec<u8> {
 /// for the classic-Mac bitmaps (their real color table is an external QuickTime `clut`).
 const MAC_TRANSPARENT_INDEX: u8 = 0x00;
 
-/// Decode an Apple QuickTime **SMC** (`'smc '`) opcode stream to a top-down 8bpp raster of
-/// `w`×`h`. SMC works on 4×4-pixel blocks in raster-of-tiles order, keeping three round-robin
-/// color caches (pairs / quads / octets). `buf` is the chunk payload *after* the 4-byte
-/// flags+length header. Malformed input stops early. (Port of the reference SMC decoder.)
-fn decode_smc(buf: &[u8], w: usize, h: usize) -> Vec<u8> {
+/// Decode an Apple QuickTime **SMC** (`'smc '`) opcode stream into `pix`, a `w`-stride,
+/// block-height (`⌈h/4⌉·4`) 8bpp raster. SMC works on 4×4-pixel blocks in raster-of-tiles
+/// order, keeping three round-robin color caches (pairs / quads / octets). Because SMC is an
+/// *inter-frame* codec, a "skip" opcode leaves the destination pixels untouched — so `pix` is
+/// caller-owned and **persists across cels**: pass the previous frame's buffer to composite a
+/// delta frame over it (or a zeroed buffer for a standalone/keyframe decode). `buf` is the
+/// chunk payload *after* the 4-byte flags+length header. Malformed input stops early.
+fn decode_smc(buf: &[u8], w: usize, h: usize, pix: &mut [u8]) {
     let stride = w;
-    let hp = h.div_ceil(4) * 4;
-    let mut pix = vec![MAC_TRANSPARENT_INDEX; stride * hp];
     let mut pair = [0u8; 512];
     let mut quad = [0u8; 1024];
     let mut octet = [0u8; 2048];
@@ -223,7 +224,7 @@ fn decode_smc(buf: &[u8], w: usize, h: usize) -> Vec<u8> {
             for _ in 0..4 {
                 for _ in 0..4 {
                     let v = $val;
-                    put(&mut pix, b, v);
+                    put(pix, b, v);
                     b += 1;
                     $i += 1;
                 }
@@ -251,7 +252,7 @@ fn decode_smc(buf: &[u8], w: usize, h: usize) -> Vec<u8> {
                         row_ptr + pixel_ptr - 4
                     };
                     let dst = row_ptr + pixel_ptr;
-                    block!(dst, |i| get(&pix, prev + (i % 4 + (i / 4) * stride) as i64));
+                    block!(dst, |i| get(pix, prev + (i % 4 + (i / 4) * stride) as i64));
                     advance!();
                     total -= 1;
                     n -= 1;
@@ -276,7 +277,7 @@ fn decode_smc(buf: &[u8], w: usize, h: usize) -> Vec<u8> {
                     let prev = if flag { pbp2 } else { pbp1 };
                     flag = !flag;
                     let dst = row_ptr + pixel_ptr;
-                    block!(dst, |i| get(&pix, prev + (i % 4 + (i / 4) * stride) as i64));
+                    block!(dst, |i| get(pix, prev + (i % 4 + (i / 4) * stride) as i64));
                     advance!();
                     total -= 1;
                     n -= 1;
@@ -391,12 +392,6 @@ fn decode_smc(buf: &[u8], w: usize, h: usize) -> Vec<u8> {
             }
         }
     }
-    // Crop the block-padded buffer to w×h (already top-down).
-    let mut out = vec![MAC_TRANSPARENT_INDEX; w * h];
-    for y in 0..h {
-        out[y * w..(y + 1) * w].copy_from_slice(&pix[y * stride..y * stride + w]);
-    }
-    out
 }
 
 #[inline]
@@ -957,21 +952,81 @@ impl ActFile {
     }
 
     /// Decode a [`CelFormat::MacBitmap`] cel (a QuickTime SMC chunk) to `(width, height,
-    /// indices)`: a top-down 8bpp raster. Index [`MAC_TRANSPARENT_INDEX`] is the transparent
-    /// key. Returns `None` for non-Mac cels or if the pixel size is unknown.
+    /// indices)`: a standalone top-down 8bpp raster (unpainted "skip" areas are index 0).
+    /// SMC is inter-frame, so delta cels only make full sense composited in playback order —
+    /// see [`animate`](Self::animate). Returns `None` for non-Mac cels or unknown pixel size.
     pub fn decode_smc_cel(&self, index: usize) -> Option<(u32, u32, Vec<u8>)> {
+        let (w, h) = (self.smc_size.0 as usize, self.smc_size.1 as usize);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let hp = h.div_ceil(4) * 4;
+        let mut pix = vec![MAC_TRANSPARENT_INDEX; w * hp];
+        self.decode_smc_into(index, &mut pix)?;
+        Some((w as u32, h as u32, pix[..w * h].to_vec()))
+    }
+
+    /// Apply a [`CelFormat::MacBitmap`] cel's SMC opcodes to `pix` (a `w`-stride, block-height
+    /// buffer). "Skip" opcodes leave the existing contents, so passing the previous frame's
+    /// buffer composites a delta frame over it. Returns `None` for non-Mac cels.
+    fn decode_smc_into(&self, index: usize, pix: &mut [u8]) -> Option<()> {
         let cel = self.cels.get(index)?;
         if cel.format != CelFormat::MacBitmap {
             return None;
         }
         let (w, h) = (self.smc_size.0 as usize, self.smc_size.1 as usize);
-        if w == 0 || h == 0 {
-            return None;
-        }
         // Each cel is `[u8 flags][u24-BE length]` then the SMC opcode stream.
         let chunk = self.data.get(cel.offset..cel.offset + cel.len)?;
-        let payload = chunk.get(4..)?;
-        Some((w as u32, h as u32, decode_smc(payload, w, h)))
+        decode_smc(chunk.get(4..)?, w, h, pix);
+        Some(())
+    }
+
+    /// Resolve an object-table index to the backing cel index, if it's a leaf image.
+    fn object_cel(&self, object: usize) -> Option<usize> {
+        match self.objects.get(object)? {
+            ObjRef::Cel(ci) => Some(*ci as usize),
+            _ => None,
+        }
+    }
+
+    /// Render an action to a list of composited `(frame, duration_ms)` pairs. Classic-Mac
+    /// (SMC) characters are inter-frame video: cels are decoded into one persistent buffer in
+    /// playback order, so each delta frame composites over the previous one and the keyframe's
+    /// backdrop persists. Other formats render each frame independently via
+    /// [`render_object`](Self::render_object).
+    pub fn animate(&self, action: &Action, max_steps: usize, seed: u64) -> Vec<(Rgba, u16)> {
+        let seq = self.action_sequence_seeded(action, max_steps, seed);
+        if self.image_format != CelFormat::MacBitmap {
+            return seq
+                .iter()
+                .filter_map(|&(obj, dur)| self.render_object(obj as usize).map(|f| (f, dur)))
+                .collect();
+        }
+        let (w, h) = (self.smc_size.0 as usize, self.smc_size.1 as usize);
+        if w == 0 || h == 0 {
+            return Vec::new();
+        }
+        let hp = h.div_ceil(4) * 4;
+        let pal = mac_palette();
+        let mut pix = vec![MAC_TRANSPARENT_INDEX; w * hp];
+        seq.iter()
+            .map(|&(obj, dur)| {
+                if let Some(ci) = self.object_cel(obj as usize) {
+                    self.decode_smc_into(ci, &mut pix);
+                }
+                let mut pixels = vec![0u8; w * h * 4];
+                for (i, &idx) in pix[..w * h].iter().enumerate() {
+                    let c = pal[idx as usize];
+                    pixels[i * 4..i * 4 + 4].copy_from_slice(&[c.r, c.g, c.b, 255]);
+                }
+                let frame = Rgba {
+                    width: w as u32,
+                    height: h as u32,
+                    pixels,
+                };
+                (frame, dur)
+            })
+            .collect()
     }
 
     /// Rasterize cel `index` to top-down RGBA. WMF cels are rendered from their metafile
