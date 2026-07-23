@@ -993,14 +993,21 @@ impl ActFile {
                 Some(img.to_rgba(&bitmap_palette()))
             }
             CelFormat::MacBitmap => {
+                // Mac cels are complete opaque scenes (a backdrop plus the character), not
+                // keyed images — index 0 is white, not a transparent color. Color every pixel
+                // and leave it fully opaque.
                 let (w, h, indices) = self.decode_smc_cel(index)?;
-                let img = Indexed {
+                let pal = mac_palette();
+                let mut pixels = vec![0u8; indices.len() * 4];
+                for (i, &idx) in indices.iter().enumerate() {
+                    let c = pal[idx as usize];
+                    pixels[i * 4..i * 4 + 4].copy_from_slice(&[c.r, c.g, c.b, 255]);
+                }
+                Some(Rgba {
                     width: w,
                     height: h,
-                    indices,
-                    transparent: MAC_TRANSPARENT_INDEX,
-                };
-                Some(img.to_rgba(&mac_palette()))
+                    pixels,
+                })
             }
             CelFormat::Wmf => {
                 let bytes = self.data.get(cel.offset..cel.offset + cel.len)?;
