@@ -104,25 +104,28 @@ Implemented:
 - **ACS 1.5** — the older **OLE2 compound-document** format (a `char.acf` header stream +
   one compressed stream per animation), normalized into the same `AcsFile`.
 - **ACT** (`ActFile`) — the *Microsoft Actor* character table that preceded Agent (the
-  Office 97/98 Assistants — Clippit, Rover, The Genius — and Microsoft Bob), in both the
-  little-endian PC and big-endian classic-Mac byte orders. The PC characters reach
-  **ACS-level parity**: the container (identity, palette, embedded WAV sounds), the **object
-  table** (index → image cel or composited pose), the **poses** (layered image parts), and
-  the **named animations** (Idle, Greeting, Thinking, … by their Actor action ids, each with
-  random variants and a frame program of show / weighted-branch / sound ops) all decode.
-  [`ActFile::render_object`] composites any object to a full RGBA character frame and
-  `ActFile::action_sequence` runs an action's program like the ACS sequencer. This is the
-  format the original engine uses — both the vector (WMF: Clippit, Rover) and
-  compressed-bitmap (The Genius) characters share it.
-  The Genius's artwork is `MNAK`-tagged compressed bitmaps: each block LZ77-decompresses
-  (same bitstream as ACS) into several run-length-encoded 8bpp sub-images. The classic-Mac
-  characters store their cels as **Apple QuickTime SMC** (`'smc '`) chunks, which
-  [`ActFile::render_cel`] also decodes. Both bitmap forms are colored with the standard
-  Windows palette as a placeholder — the characters' true per-character color tables live
-  outside the file (host-supplied), so custom-palette characters render with stand-in colors.
+  Office 97/98 Assistants — Clippit, Rover, The Genius, Mother Nature, Will, Earl, Rocky,
+  Bosgrove, Max, … — and Microsoft Bob), in both the little-endian PC and big-endian
+  classic-Mac byte orders. **Fully supported** — every character decodes, renders, and
+  animates. The container (identity, palette, embedded WAV sounds), the **object table**
+  (index → image cel or composited pose), the **poses** (layered image parts), and the
+  **named animations** (Idle, Greeting, Thinking, … by their Actor action ids, each with
+  random variants and a frame program of show / weighted-branch / sound ops) all decode —
+  the actual format the original engine uses, shared across every character variant.
+  `ActFile::render_object` composites any object to a full RGBA character frame,
+  `ActFile::action_sequence` runs an action's program like the ACS sequencer, and
+  `ActFile::animate` returns an action's composited, timed frames.
+  All three artwork encodings rasterize to full color:
+  - **WMF** vector cels (Clippit, Rover, Will, …) — rendered from the metafile.
+  - **`MNAK`** compressed bitmaps (The Genius, Mother Nature, Earl, Rocky) — LZ77
+    (the ACS bitstream) → run-length-encoded 8bpp sub-images, colored with the Windows
+    system palette.
+  - **Apple QuickTime SMC** (`'smc '`) — the classic-Mac cels, an inter-frame video codec
+    (a keyframe plus delta frames composited over it), colored with the Macintosh system
+    palette. `animate` handles the inter-frame compositing.
 
-Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), the external
-per-character color tables, and a small set of files with an obfuscated/variant 2.0
+Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), and a small set of files
+with an obfuscated/variant 2.0
 char-info block. Run the `sweep` example to audit a character library against the parser.
 
 ## `crustagent-core` — status

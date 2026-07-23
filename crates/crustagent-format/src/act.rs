@@ -16,17 +16,20 @@
 //!
 //! # Artwork
 //!
-//! Cels are stored in one of a few forms. This module fully supports the common PC form:
-//! each cel is an **Aldus Placeable Windows Metafile** (a vector drawing — filled polygons
-//! with pen/brush colors) which [`ActFile::render_cel`] rasterizes to [`Rgba`].
+//! Cels come in three encodings, and [`ActFile::render_cel`] rasterizes all of them to
+//! [`Rgba`]:
 //!
-//! Newer PC characters (e.g. The Genius) instead store their artwork as LZ-compressed
-//! blocks tagged `MNAK`. Each block holds several sub-images; each is an 8bpp raster under
-//! a simple run-length encoding. [`ActFile::render_cel`] decodes these too, coloring them
-//! with the standard Windows 256-color palette (index 10 is the transparent color key).
-//! The classic-Mac artwork codec is a different, still-undecoded form. In all cases the
-//! container still parses (identity, palette, sounds) and reports each cel's encoding via
-//! [`CelFormat`].
+//! - **Aldus Placeable Windows Metafile** — the common PC vector form (filled polygons with
+//!   pen/brush colors), e.g. Clippit and Rover.
+//! - **`MNAK`** — LZ-compressed bitmaps used by newer PC characters (e.g. The Genius): each
+//!   block holds several 8bpp run-length-encoded sub-images, colored with the standard
+//!   Windows 256-color palette (index 10 is the transparent key).
+//! - **Apple QuickTime SMC** (`'smc '`) — the classic-Mac cels, an inter-frame video codec
+//!   colored with the Macintosh system palette. Because SMC frames are deltas over a
+//!   keyframe, play them through [`ActFile::animate`], which composites in order.
+//!
+//! The container (identity, palette, embedded sounds), the object/pose/animation tables, and
+//! every cel encoding are all decoded; [`CelFormat`] reports which form a cel uses.
 //!
 //! ```no_run
 //! use crustagent_format::act::ActFile;
@@ -456,7 +459,8 @@ pub enum CelFormat {
     Wmf,
     /// Compressed 8bpp raster (an `MNAK` sub-image). Rasterized by [`ActFile::render_cel`].
     Bitmap,
-    /// The classic-Mac artwork codec (not yet decoded).
+    /// Apple QuickTime SMC (`'smc '`) chunk — the classic-Mac artwork. Rasterized by
+    /// [`ActFile::render_cel`]; composite an action's frames with [`ActFile::animate`].
     MacBitmap,
 }
 
@@ -477,10 +481,10 @@ pub struct Cel {
     pub sub: u16,
 }
 
-/// One layered part of a pose: an image cel placed at a destination rectangle.
+/// One layered part of a pose: an object placed at a destination rectangle.
 #[derive(Clone, Copy, Debug)]
 pub struct Part {
-    /// Index into [`ActFile::cels`].
+    /// Object-table index of the source image (render via [`ActFile::render_object`]).
     pub image: u16,
     /// Destination rectangle `(left, top, right, bottom)` in twips (1/1440"), signed —
     /// parts can sit partly off the frame edge.
@@ -601,7 +605,7 @@ pub struct ActFile {
     pub image_size: (u16, u16),
     /// Optional color palette (used by the bitmap artwork forms; often tiny for WMF files).
     pub palette: Vec<Color>,
-    /// The artwork encoding this file uses. Only [`CelFormat::Wmf`] can be rendered.
+    /// The artwork encoding this file uses (all three render via [`ActFile::render_cel`]).
     pub image_format: CelFormat,
     /// Artwork cels, in file order.
     pub cels: Vec<Cel>,
@@ -1322,13 +1326,12 @@ fn extract_wave_streams(data: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-/// Decode the object directory (poses), the frame graph, and the named actions for a WMF
-/// character. Tolerant: returns whatever parses cleanly, or empties on any mismatch.
 /// Decode the character's animation tables — the object table (index → cel/pose), the poses,
 /// and the named actions with their frame programs. This is the format the Actor engine
-/// actually uses; the WMF (Clippit, Rover) and MNAK-bitmap (The Genius) PC characters share
-/// it. Region offsets come from the 70-byte char-info header at the body base (mirrored into
-/// `sections`, relative to that base); the artwork pool begins at the first cel.
+/// actually uses; every character variant (WMF, MNAK-bitmap, classic-Mac SMC) shares it.
+/// Region offsets come from the 70-byte char-info header at the body base (mirrored into
+/// `sections`, relative to that base); the artwork pool begins at the first cel. Tolerant:
+/// returns whatever parses cleanly, or empties on any mismatch.
 fn parse_animation(
     r: &Rdr,
     cels: &[Cel],
