@@ -106,6 +106,34 @@ fn bitmap_palette() -> Vec<Color> {
         .collect()
 }
 
+/// The standard Macintosh 256-color system palette, which the classic-Mac (SMC) cels are
+/// authored against (their QuickTime image description points at the system `clut`). It is a
+/// 6×6×6 color cube over the levels `{255,204,153,102,51,0}` (index 0 = white) followed by
+/// four 1/16-step ramps — pure red, green, blue, then gray.
+fn mac_palette() -> Vec<Color> {
+    const CUBE: [u8; 6] = [255, 204, 153, 102, 51, 0];
+    const RAMP: [u8; 10] = [238, 221, 187, 170, 136, 119, 85, 68, 34, 17];
+    let mut pal = Vec::with_capacity(256);
+    for &r in &CUBE {
+        for &g in &CUBE {
+            for &b in &CUBE {
+                pal.push(Color { r, g, b });
+            }
+        }
+    }
+    for ch in 0..4 {
+        for &v in &RAMP {
+            pal.push(match ch {
+                0 => Color { r: v, g: 0, b: 0 },
+                1 => Color { r: 0, g: v, b: 0 },
+                2 => Color { r: 0, g: 0, b: v },
+                _ => Color { r: v, g: v, b: v },
+            });
+        }
+    }
+    pal
+}
+
 /// Decode Actor's 8bpp run-length scheme to `expected` bytes: control byte `c` — when
 /// `c < 0x80`, repeat the following byte `c` times; otherwise copy the next `c & 0x7f` bytes
 /// literally. Output is clamped to `expected` (short/garbled input just stops early).
@@ -948,8 +976,9 @@ impl ActFile {
 
     /// Rasterize cel `index` to top-down RGBA. WMF cels are rendered from their metafile
     /// (sized to the cel's bounding box); [`CelFormat::Bitmap`] cels are RLE-decoded and
-    /// [`CelFormat::MacBitmap`] cels are SMC-decoded, both colored with the standard Windows
-    /// palette (the characters' true color tables are external). Returns `None` if undecodable.
+    /// colored with the standard Windows palette; [`CelFormat::MacBitmap`] cels are
+    /// SMC-decoded and colored with the standard Macintosh system palette. Returns `None` if
+    /// the cel can't be decoded.
     pub fn render_cel(&self, index: usize) -> Option<Rgba> {
         let cel = self.cels.get(index)?;
         match cel.format {
@@ -971,7 +1000,7 @@ impl ActFile {
                     indices,
                     transparent: MAC_TRANSPARENT_INDEX,
                 };
-                Some(img.to_rgba(&bitmap_palette()))
+                Some(img.to_rgba(&mac_palette()))
             }
             CelFormat::Wmf => {
                 let bytes = self.data.get(cel.offset..cel.offset + cel.len)?;
