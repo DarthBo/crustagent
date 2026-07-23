@@ -1,11 +1,13 @@
-//! Dump a summary of a Microsoft Actor (`.act`) character and optionally render a cel.
+//! Dump a summary of a Microsoft Actor (`.act`) character, and optionally render an action
+//! or a cel to PNG.
 //!
 //! Usage:
 //!   `cargo run -p crustagent-format --example act_dump -- <file.act>`
-//!   `cargo run -p crustagent-format --example act_dump -- <file.act> <celIndex> [out.png]`
+//!   `cargo run -p crustagent-format --example act_dump -- <file.act> <Action|celIndex> [out.png]`
 //!
-//! With a cel index, the placeable-WMF cel is rasterized and written as a PNG. The PNG
-//! encoder here is the same tiny dependency-free one used by the `render` example.
+//! An action name (e.g. `Thinking`) renders that animation's first composited frame; a
+//! number renders that cel. The PNG encoder here is the same tiny dependency-free one used
+//! by the `render` example.
 
 use crustagent_format::act::CelFormat;
 use crustagent_format::{ActFile, Rgba};
@@ -19,8 +21,6 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let cel_index: Option<usize> = args.next().and_then(|s| s.parse().ok());
-
     let act = ActFile::open(&path).unwrap_or_else(|e| {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
@@ -42,12 +42,44 @@ fn main() {
     println!("Palette    : {} colors", act.palette.len());
     println!("Artwork    : {:?}", act.image_format);
     println!("Cels       : {}", act.cels.len());
+    println!("Poses      : {}", act.poses.len());
+    println!("Frames     : {}", act.frames.len());
     println!("Sounds     : {} embedded WAVE stream(s)", act.sounds.len());
+    if !act.actions.is_empty() {
+        let names: Vec<String> = act.actions.iter().map(|a| a.name.clone()).collect();
+        println!("Actions    : {} — {}", act.actions.len(), names.join(", "));
+    }
 
-    let Some(idx) = cel_index else { return };
+    // With a second arg, render: an action name -> its first frame, or a cel index -> PNG.
+    let Some(arg) = std::env::args().nth(2) else {
+        return;
+    };
     let out_path = std::env::args()
         .nth(3)
-        .unwrap_or_else(|| format!("cel_{idx}.png"));
+        .unwrap_or_else(|| "act_out.png".to_string());
+
+    if let Some(action) = act.action(&arg) {
+        let seq = act.action_sequence(action, 64);
+        println!("action {:?}: {} step(s)", action.name, seq.len());
+        if let Some(&(object, _)) = seq.first() {
+            match act.render_object(object as usize) {
+                Some(img) => {
+                    std::fs::write(&out_path, encode_png(&img)).unwrap();
+                    println!(
+                        "wrote {out_path} ({}x{}) — first frame",
+                        img.width, img.height
+                    );
+                }
+                None => eprintln!("could not render object {object}"),
+            }
+        }
+        return;
+    }
+
+    let Ok(idx) = arg.parse::<usize>() else {
+        eprintln!("no action named {arg:?}");
+        return;
+    };
     match act.cels.get(idx).map(|c| c.format) {
         Some(CelFormat::Wmf) => match act.render_cel(idx) {
             Some(img) => {

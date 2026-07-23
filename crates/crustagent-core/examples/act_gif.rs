@@ -1,11 +1,11 @@
-//! Export a Microsoft Actor (`.act`) character's artwork to an animated GIF that flips
-//! through its cels — a quick way to *see* the reverse-engineered vector artwork.
+//! Export a Microsoft Actor (`.act`) animation to an animated GIF.
 //!
-//! Usage: `cargo run -p crustagent-core --example act_gif -- <file.act> [out.gif] [delay_cs]`
+//! Usage: `cargo run -p crustagent-core --example act_gif -- <file.act> [Action] [out.gif]`
 //!
-//! Actor files don't carry a decoded animation timeline yet (see `crustagent_format::act`),
-//! so this cycles the cels one per frame rather than playing a real gesture. Non-WMF
-//! artwork (The Genius, the classic-Mac files) can't be rendered yet and yields no frames.
+//! With an action name (e.g. `Greeting`, `Thinking`, `Searching`) the frame graph is
+//! walked and each frame's pose is composited to the character's full frame. With no name
+//! (or `cels`) it flips through every artwork cel instead. Non-WMF artwork (The Genius,
+//! the classic-Mac files) isn't rasterized yet.
 
 use crustagent_format::act::CelFormat;
 use crustagent_format::{ActFile, Rgba};
@@ -16,87 +16,118 @@ fn main() {
     let path = match args.next() {
         Some(p) => p,
         None => {
-            eprintln!("usage: act_gif <file.act> [out.gif] [delay_cs]");
+            eprintln!("usage: act_gif <file.act> [Action|cels] [out.gif]");
             std::process::exit(2);
         }
     };
-    let out_path = args.next().unwrap_or_else(|| "actor.gif".to_string());
-    let delay_cs: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(12);
-
+    let which = args.next();
     let act = ActFile::open(&path).unwrap_or_else(|e| {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
     });
-
     if act.image_format != CelFormat::Wmf {
         eprintln!(
-            "{}: artwork is {:?}, which isn't decoded yet — nothing to render",
+            "{}: artwork is {:?}, which isn't rasterized yet",
             act.name, act.image_format
         );
         std::process::exit(1);
     }
 
-    // Render every WMF cel to RGBA.
-    let cels: Vec<Rgba> = (0..act.cels.len())
-        .filter_map(|i| act.render_cel(i))
-        .collect();
-    if cels.is_empty() {
-        eprintln!("{}: no renderable cels", act.name);
+    // Collect (frame, delay_cs) pairs: an action's composited poses, or the cel gallery.
+    let (w, h, frames): (usize, usize, Vec<(Rgba, u16)>) =
+        if which.as_deref() == Some("cels") || act.actions.is_empty() {
+            cel_gallery(&act)
+        } else {
+            // Named action, or default to Greeting/first when none given.
+            let action = which
+                .as_deref()
+                .and_then(|n| act.action(n))
+                .or_else(|| act.action("Greeting"))
+                .or_else(|| act.actions.first())
+                .expect("actions non-empty");
+            let (cw, ch) = (act.image_size.0 as usize, act.image_size.1 as usize);
+            let seq = act.action_sequence(action, 200);
+            let frames = seq
+                .iter()
+                .filter_map(|&(obj, dur)| {
+                    act.render_object(obj as usize)
+                        .map(|img| (img, (dur / 10).max(2)))
+                })
+                .collect();
+            println!("action {:?}: {} frame(s)", action.name, seq.len());
+            (cw, ch, frames)
+        };
+
+    if frames.is_empty() {
+        eprintln!("{}: nothing to render", act.name);
         std::process::exit(1);
     }
+    let out_path = args.next().unwrap_or_else(|| "actor.gif".to_string());
 
-    // Canvas is the largest cel; each cel is centered on it (the cels share a logical space
-    // but frame-accurate placement needs the not-yet-decoded frame table).
-    let cw = cels.iter().map(|c| c.width).max().unwrap() as usize;
-    let ch = cels.iter().map(|c| c.height).max().unwrap() as usize;
-
-    // Build a palette from the distinct opaque colors across all cels. Index 0 is the
-    // transparent key. Actor vector art uses few colors, so an exact table almost always
-    // fits; any overflow maps to the nearest existing entry.
-    let mut palette: Vec<[u8; 3]> = vec![[0, 0, 0]]; // 0 = transparent key
+    // Palette from the distinct opaque colors (index 0 = transparent key).
     let transparent = 0u8;
-    for cel in &cels {
-        for px in cel.pixels.chunks_exact(4) {
-            if px[3] == 0 {
-                continue;
-            }
-            let rgb = [px[0], px[1], px[2]];
-            if palette.len() < 256 && !palette[1..].contains(&rgb) {
-                palette.push(rgb);
-            }
-        }
-    }
-
-    let mut gif = GifBuilder::new(cw as u16, ch as u16, &palette, transparent);
-    for cel in &cels {
-        let mut frame = vec![transparent; cw * ch];
-        let ox = (cw - cel.width as usize) / 2;
-        let oy = (ch - cel.height as usize) / 2;
-        for y in 0..cel.height as usize {
-            for x in 0..cel.width as usize {
-                let s = (y * cel.width as usize + x) * 4;
-                if cel.pixels[s + 3] == 0 {
-                    continue;
+    let mut palette: Vec<[u8; 3]> = vec![[0, 0, 0]];
+    for (img, _) in &frames {
+        for px in img.pixels.chunks_exact(4) {
+            if px[3] != 0 && palette.len() < 256 {
+                let rgb = [px[0], px[1], px[2]];
+                if !palette[1..].contains(&rgb) {
+                    palette.push(rgb);
                 }
-                let rgb = [cel.pixels[s], cel.pixels[s + 1], cel.pixels[s + 2]];
-                frame[(oy + y) * cw + (ox + x)] = nearest(&palette, rgb, transparent);
             }
         }
-        gif.add_frame(&frame, delay_cs);
     }
 
+    let mut gif = GifBuilder::new(w as u16, h as u16, &palette, transparent);
+    for (img, delay) in &frames {
+        let mut idx = vec![transparent; w * h];
+        for (i, px) in img.pixels.chunks_exact(4).enumerate() {
+            if px[3] != 0 {
+                idx[i] = nearest(&palette, [px[0], px[1], px[2]], transparent);
+            }
+        }
+        gif.add_frame(&idx, *delay);
+    }
     std::fs::write(&out_path, gif.finish()).unwrap_or_else(|e| {
         eprintln!("write {out_path}: {e}");
         std::process::exit(1);
     });
     println!(
-        "wrote {out_path} ({cw}x{ch}, {} cel frame(s), {} colors)",
-        cels.len(),
+        "wrote {out_path} ({w}x{h}, {} frame(s), {} colors)",
+        frames.len(),
         palette.len()
     );
 }
 
-/// Index of the palette entry closest to `rgb` (skipping the transparent slot).
+/// Fallback: one frame per artwork cel, each centered on a canvas sized to the largest cel.
+fn cel_gallery(act: &ActFile) -> (usize, usize, Vec<(Rgba, u16)>) {
+    let cels: Vec<Rgba> = (0..act.cels.len())
+        .filter_map(|i| act.render_cel(i))
+        .collect();
+    let w = cels.iter().map(|c| c.width).max().unwrap_or(1) as usize;
+    let h = cels.iter().map(|c| c.height).max().unwrap_or(1) as usize;
+    let framed = cels
+        .into_iter()
+        .map(|cel| {
+            let mut canvas = Rgba::transparent(w as u32, h as u32);
+            let ox = (w - cel.width as usize) / 2;
+            let oy = (h - cel.height as usize) / 2;
+            for y in 0..cel.height as usize {
+                for x in 0..cel.width as usize {
+                    let s = (y * cel.width as usize + x) * 4;
+                    if cel.pixels[s + 3] != 0 {
+                        let d = ((oy + y) * w + (ox + x)) * 4;
+                        canvas.pixels[d..d + 4].copy_from_slice(&cel.pixels[s..s + 4]);
+                    }
+                }
+            }
+            (canvas, 12u16)
+        })
+        .collect();
+    (w, h, framed)
+}
+
+/// Nearest palette index to `rgb` (skipping the transparent slot).
 fn nearest(palette: &[[u8; 3]], rgb: [u8; 3], transparent: u8) -> u8 {
     let mut best = 1u8;
     let mut best_d = u32::MAX;
@@ -104,7 +135,7 @@ fn nearest(palette: &[[u8; 3]], rgb: [u8; 3], transparent: u8) -> u8 {
         if i as u8 == transparent {
             continue;
         }
-        let d = c
+        let d: u32 = c
             .iter()
             .zip(rgb.iter())
             .map(|(&a, &b)| {

@@ -105,8 +105,12 @@ Implemented:
   one compressed stream per animation), normalized into the same `AcsFile`.
 - **ACT** (`ActFile`) — the *Microsoft Actor* character table that preceded Agent (the
   Office 97/98 Assistants — Clippit, Rover, The Genius — and Microsoft Bob), in both the
-  little-endian PC and big-endian classic-Mac byte orders. Parses the container (identity,
-  palette, embedded WAV sounds) and **rasterizes the vector metafile (WMF) cels to RGBA**.
+  little-endian PC and big-endian classic-Mac byte orders. For the vector (WMF) characters
+  this reaches **ACS-level parity**: the container (identity, palette, embedded WAV sounds),
+  the **poses** (layered image parts), the **frame graph**, and **named animations** (Idle,
+  Greeting, Thinking, … by their Actor action ids) all parse, and [`ActFile::render_object`]
+  **composites** any frame to a full RGBA character frame. `ActFile::action_sequence` walks
+  an action's frames like the ACS sequencer.
   The newer compressed-bitmap cels (The Genius, tagged `MNAK`) **decompress** with the same
   LZ77 as ACS, but their decompressed pixel body — and the classic-Mac artwork codec — aren't
   decoded to pixels yet; those files still parse and report their artwork format.
@@ -146,14 +150,15 @@ cargo run -p crustagent-format --example dump     -- assets/agents/Merlin.acs
 cargo run -p crustagent-format --example render   -- assets/agents/Merlin.acs Greet 0   # one frame -> PNG
 cargo run -p crustagent-core   --example sequence -- assets/agents/Merlin.acs Greet     # print the timeline
 cargo run -p crustagent-core   --example gif      -- assets/agents/Merlin.acs GetAttention  # gesture -> GIF
-cargo run -p crustagent-format --example act_dump -- assets/agents/ACT/clippit.act 0 clip.png # Actor cel -> PNG
-cargo run -p crustagent-core   --example act_gif  -- assets/agents/ACT/clippit.act clip.gif    # Actor cels -> GIF
+cargo run -p crustagent-format --example act_dump -- assets/agents/ACT/clippit.act Thinking t.png # Actor action -> PNG
+cargo run -p crustagent-core   --example act_gif  -- assets/agents/ACT/clippit.act Greeting g.gif  # Actor action -> GIF
 
 # See it on your desktop (transparent, always-on-top):
 cargo run -p crustagent-render -- assets/agents/Merlin.acs                  # idles
 cargo run -p crustagent-render -- assets/agents/Merlin.acs --tts            # ...and audible (cross-platform TTS)
 cargo run -p crustagent-render -- assets/agents/Merlin.acs GetAttention     # loop a specific gesture
-cargo run -p crustagent-render -- assets/agents/ACT/clippit.act             # Actor (.act): flip through its cels
+cargo run -p crustagent-render -- assets/agents/ACT/clippit.act             # Actor (.act): idles, MS-Agent-style
+cargo run -p crustagent-render -- assets/agents/ACT/clippit.act Thinking    # ...play a named Actor action
 ```
 
 With no animation named, the character **idles** — escalating `IDLINGLEVEL` animations,

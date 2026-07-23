@@ -13,10 +13,12 @@
 //! - **ACF** ([`AcfFile`]) — the uncompiled format's *header* (metadata + animation
 //!   references to external `.aca` files); `.aca` frame/image loading is TODO.
 //! - **ACT** ([`ActFile`]) — the *Microsoft Actor* character table that preceded Agent
-//!   (the Office 97/98 Assistants and Microsoft Bob), little- and big-endian. Parses the
-//!   container (identity, palette, sounds), rasterizes the common vector-metafile cels to
-//!   RGBA, and decompresses the newer `MNAK` bitmap cels (same LZ77 as ACS). The decompressed
-//!   `MNAK` cel body and the classic-Mac artwork codec aren't decoded to pixels yet.
+//!   (the Office 97/98 Assistants and Microsoft Bob), little- and big-endian. For the
+//!   vector-metafile characters it parses the full model — cels, poses (layered parts),
+//!   the frame graph, and named animations — and composites any frame to RGBA
+//!   ([`act::ActFile::render_object`]). Also decompresses the newer `MNAK` bitmap cels
+//!   (same LZ77 as ACS); their decompressed pixel body and the classic-Mac artwork codec
+//!   aren't decoded to pixels yet.
 //!
 //! Planned: `.aca` bodies, ACS 1.5 (OLE2 compound document), ACD (text script), and the
 //! ACT bitmap-body/Mac artwork codecs.

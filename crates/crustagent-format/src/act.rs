@@ -73,6 +73,104 @@ pub struct Cel {
     pub bounds: Option<(i16, i16, i16, i16)>,
 }
 
+/// One layered part of a pose: an image cel placed at a destination rectangle.
+#[derive(Clone, Copy, Debug)]
+pub struct Part {
+    /// Index into [`ActFile::cels`].
+    pub image: u16,
+    /// Destination rectangle `(left, top, right, bottom)` in twips (1/1440").
+    pub rect: (u16, u16, u16, u16),
+}
+
+/// A pose: a complete character image built by layering image parts (body, eyes, mouth…).
+#[derive(Clone, Debug, Default)]
+pub struct Pose {
+    pub parts: Vec<Part>,
+}
+
+/// How an animation frame proceeds after its pose is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Branch {
+    /// Advance to the next frame in order.
+    Next,
+    /// Unconditional jump to another frame index.
+    Jump(u16),
+    /// Branch to a frame with a probability weight (`0..=100`-ish).
+    Probable { target: u16, weight: u16 },
+}
+
+/// One animation frame: show an object for a duration, then follow its [`Branch`].
+#[derive(Clone, Copy, Debug)]
+pub struct AnimFrame {
+    /// Object index: `< cels.len()` is a bare image cel; otherwise a pose at
+    /// `poses[object - cels.len()]`. Render with [`ActFile::render_object`].
+    pub object: u16,
+    /// On-screen time in milliseconds.
+    pub duration_ms: u16,
+    pub branch: Branch,
+}
+
+/// A named animation (e.g. `"Greeting"`, `"Thinking"`), referenced by the classic
+/// Microsoft Actor action id. `first_frame` indexes [`ActFile::frames`]; playback follows
+/// each frame's [`Branch`] from there.
+#[derive(Clone, Debug)]
+pub struct Action {
+    /// Microsoft Actor action id (1 = Idle, 2 = Greeting, 24 = Thinking, …).
+    pub id: u16,
+    /// Human-readable name for `id`, or `"Action{id}"` if unknown.
+    pub name: String,
+    /// Number of consecutive frame-list entries (usually 1).
+    pub count: u16,
+    /// Starting index into [`ActFile::frames`].
+    pub first_frame: u16,
+}
+
+/// Names for the Office Assistant action ids, from Microsoft's official `MsoAnimationType`
+/// enumeration (the Office object model — the same values the Assistant/Actor engine uses).
+/// Ids outside that enum — a few internal Actor actions (7–10, 14–17, 20, 21) and
+/// character-specific ids — have no Microsoft-published name; callers fall back to
+/// `Action{id}` rather than invent one.
+fn action_name(id: u16) -> Option<&'static str> {
+    Some(match id {
+        1 => "Idle",
+        2 => "Greeting",
+        3 => "Goodbye",
+        4 => "BeginSpeaking",
+        5 => "RestPose",
+        6 => "CharacterSuccessMajor",
+        11 => "GetAttentionMajor",
+        12 => "GetAttentionMinor",
+        13 => "Searching",
+        18 => "Printing",
+        19 => "GestureRight",
+        22 => "WritingNotingSomething",
+        23 => "WorkingAtSomething",
+        24 => "Thinking",
+        25 => "SendingMail",
+        26 => "ListensToComputer",
+        31 => "Disappear",
+        32 => "Appear",
+        100 => "GetArtsy",
+        101 => "GetTechy",
+        102 => "GetWizardy",
+        103 => "CheckingSomething",
+        104 => "LookDown",
+        105 => "LookDownLeft",
+        106 => "LookDownRight",
+        107 => "LookLeft",
+        108 => "LookRight",
+        109 => "LookUp",
+        110 => "LookUpLeft",
+        111 => "LookUpRight",
+        112 => "Saving",
+        113 => "GestureDown",
+        114 => "GestureLeft",
+        115 => "GestureUp",
+        116 => "EmptyTrash",
+        _ => return None,
+    })
+}
+
 /// A parsed Actor Character Table.
 pub struct ActFile {
     /// `true` for the big-endian classic-Mac dialect (`"PL"` signature).
@@ -89,6 +187,12 @@ pub struct ActFile {
     pub image_format: CelFormat,
     /// Artwork cels, in file order.
     pub cels: Vec<Cel>,
+    /// Poses (layered image parts). Empty unless the artwork is renderable WMF.
+    pub poses: Vec<Pose>,
+    /// Animation frames (a global graph; actions index into this). Empty for non-WMF.
+    pub frames: Vec<AnimFrame>,
+    /// Named animations. Empty for non-WMF artwork.
+    pub actions: Vec<Action>,
     /// Embedded sound effects, each a complete `RIFF`/`WAVE` byte stream.
     pub sounds: Vec<Vec<u8>>,
     /// The seven section offsets from the header (artwork, sounds, tables, strings).
@@ -268,6 +372,14 @@ impl ActFile {
             None => CelFormat::Bitmap,
         };
 
+        // Animation tables — poses (layered parts), the frame graph, and named actions.
+        // Only decoded for the WMF vector characters, whose layout is validated.
+        let (poses, frames, actions) = if image_format == CelFormat::Wmf {
+            parse_anim_tables(&r, &positions, art_end, &sections)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+
         // Sounds: extract every complete RIFF/WAVE stream. (Big-endian Mac audio is stored
         // differently and is not extracted here.)
         let sounds = if big_endian {
@@ -284,6 +396,9 @@ impl ActFile {
             palette,
             image_format,
             cels,
+            poses,
+            frames,
+            actions,
             sounds,
             sections,
             data,
@@ -329,6 +444,96 @@ impl ActFile {
         }
         let bytes = self.data.get(cel.offset..cel.offset + cel.len)?;
         wmf::render(bytes, self.big_endian)
+    }
+
+    /// Composite pose `index` (from [`ActFile::poses`]) into a full character frame, sized
+    /// [`ActFile::image_size`]. Parts are drawn in order, each cel placed at its
+    /// destination (twips ÷ 15 → pixels). Returns `None` if the pose can't be rendered.
+    pub fn render_pose(&self, index: usize) -> Option<Rgba> {
+        let pose = self.poses.get(index)?;
+        let (cw, ch) = (self.image_size.0 as u32, self.image_size.1 as u32);
+        if cw == 0 || ch == 0 {
+            return None;
+        }
+        let mut canvas = Rgba::transparent(cw, ch);
+        for part in &pose.parts {
+            let Some(cel) = self.render_cel(part.image as usize) else {
+                continue;
+            };
+            let ox = (part.rect.0 as i32) / 15;
+            let oy = (part.rect.1 as i32) / 15;
+            blit_over(&mut canvas, &cel, ox, oy);
+        }
+        Some(canvas)
+    }
+
+    /// Render an animation frame's object to a full character frame ([`ActFile::image_size`]).
+    /// `object >= cels.len()` is a pose (composited). A sentinel (`0xFFFF`) or any other
+    /// out-of-range value is a blank/hidden frame → a fully transparent frame. Returns
+    /// `None` only if the frame size is unknown.
+    pub fn render_object(&self, object: usize) -> Option<Rgba> {
+        let pose = object.checked_sub(self.cels.len());
+        match pose {
+            Some(p) if p < self.poses.len() => self.render_pose(p),
+            _ => {
+                let (w, h) = (self.image_size.0 as u32, self.image_size.1 as u32);
+                (w != 0 && h != 0).then(|| Rgba::transparent(w, h))
+            }
+        }
+    }
+
+    /// Find an action by (case-insensitive) name — e.g. `"Greeting"`, `"Thinking"`.
+    pub fn action(&self, name: &str) -> Option<&Action> {
+        self.actions
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Resolve an action to a linear list of `(object, duration_ms)` steps by walking the
+    /// frame graph from its start frame — advancing, jumping, or taking branches — with a
+    /// visit cap so loops terminate. This is the ACT analogue of the ACS sequencer.
+    pub fn action_sequence(&self, action: &Action, max_steps: usize) -> Vec<(u16, u16)> {
+        let mut out = Vec::new();
+        let mut visits = std::collections::HashMap::new();
+        let mut i = action.first_frame as usize;
+        while out.len() < max_steps {
+            let Some(frame) = self.frames.get(i) else {
+                break;
+            };
+            *visits.entry(i).or_insert(0u32) += 1;
+            if visits[&i] > 3 {
+                break; // looped enough for a preview
+            }
+            out.push((frame.object, frame.duration_ms));
+            i = match frame.branch {
+                Branch::Next => i + 1,
+                Branch::Jump(t) => t as usize,
+                Branch::Probable { target, .. } => target as usize,
+            };
+        }
+        out
+    }
+}
+
+/// Alpha-over composite `src` onto `dst` at pixel offset `(ox, oy)` (opaque src pixels win).
+fn blit_over(dst: &mut Rgba, src: &Rgba, ox: i32, oy: i32) {
+    for sy in 0..src.height as i32 {
+        let dy = oy + sy;
+        if dy < 0 || dy >= dst.height as i32 {
+            continue;
+        }
+        for sx in 0..src.width as i32 {
+            let dx = ox + sx;
+            if dx < 0 || dx >= dst.width as i32 {
+                continue;
+            }
+            let si = ((sy as u32 * src.width + sx as u32) * 4) as usize;
+            if src.pixels[si + 3] == 0 {
+                continue;
+            }
+            let di = ((dy as u32 * dst.width + dx as u32) * 4) as usize;
+            dst.pixels[di..di + 4].copy_from_slice(&src.pixels[si..si + 4]);
+        }
     }
 }
 
@@ -400,6 +605,166 @@ fn extract_wave_streams(data: &[u8]) -> Vec<Vec<u8>> {
         i += 1;
     }
     out
+}
+
+/// Decode the object directory (poses), the frame graph, and the named actions for a WMF
+/// character. Tolerant: returns whatever parses cleanly, or empties on any mismatch.
+fn parse_anim_tables(
+    r: &Rdr,
+    cel_positions: &[usize],
+    art_end: usize,
+    sections: &[u32; 7],
+) -> (Vec<Pose>, Vec<AnimFrame>, Vec<Action>) {
+    let empty = || (Vec::new(), Vec::new(), Vec::new());
+    let ncel = cel_positions.len();
+    if ncel < 3 {
+        return empty();
+    }
+    let base = cel_positions[0];
+    let sec0 = sections[0] as usize;
+    let lim = (art_end - base) as u32;
+
+    // Locate the object directory inside section[0] by matching the known cel end-offsets
+    // (object i's end == the next cel's start). No reliance on a fixed header size.
+    let want0 = (cel_positions[1] - base) as u32;
+    let want1 = (cel_positions[2] - base) as u32;
+    let mut dir_pos = None;
+    for q in sec0..(sec0 + 64).min(r.b.len().saturating_sub(8)) {
+        if r.u32(q) == want0 && r.u32(q + 4) == want1 {
+            dir_pos = Some(q);
+            break;
+        }
+    }
+    let Some(mut q) = dir_pos else {
+        return empty();
+    };
+    // Read all object end-offsets (increasing, within the artwork region).
+    let mut ends = Vec::new();
+    while q + 4 <= r.b.len() {
+        let v = r.u32(q);
+        if v >= lim || (ends.last().is_some_and(|&p| v <= p)) {
+            break;
+        }
+        ends.push(v);
+        q += 4;
+    }
+    let nobj = ends.len();
+    if nobj <= ncel {
+        return empty();
+    }
+
+    // Poses: objects [ncel, nobj). Object o spans [base + ends[o-1], base + ends[o]).
+    let mut poses = Vec::with_capacity(nobj - ncel);
+    for o in ncel..nobj {
+        let s = base + ends[o - 1] as usize;
+        let e = base + ends[o] as usize;
+        let count = r.u16(s + 2) as usize;
+        let mut parts = Vec::with_capacity(count);
+        for p in 0..count {
+            let po = s + 4 + p * 10;
+            if po + 10 > e {
+                break;
+            }
+            parts.push(Part {
+                image: r.u16(po),
+                rect: (r.u16(po + 2), r.u16(po + 4), r.u16(po + 6), r.u16(po + 8)),
+            });
+        }
+        poses.push(Pose { parts });
+    }
+
+    // Frame graph: section[3]. Find the frame start by trying offsets until the walk lands
+    // exactly on section[4]. Each frame is (object u16, durationMs u16, branchType u16) plus
+    // a 6-byte branch when branchType is 1 (jump) or 2 (probable); branchType 0x0100 ends a
+    // list and is followed by a u32 to skip. Frames are flattened to one global index space.
+    let s3 = sections[3] as usize;
+    let s3_end = sections[4] as usize;
+    // The frame stream is preceded by a header (a leading word + several cel-pool offsets)
+    // terminated by the first end-of-list marker (u16 0x0100) and a u32. Candidate frame
+    // starts are just past each such marker; take the first whose walk consumes the section
+    // (so the header's cel offsets aren't mis-parsed as frames, which would shift indices).
+    let ncel_u16 = ncel as u16;
+    let marker_starts: Vec<usize> = (s3..s3_end.saturating_sub(6))
+        .step_by(2)
+        .filter(|&p| r.u16(p) == 0x0100)
+        .map(|p| p + 6)
+        // The first frame shows the first pose (object == ncel); this pins the true start
+        // so the header's cel offsets aren't mis-parsed as frames (which shifts all indices).
+        .filter(|&start| r.u16(start) == ncel_u16)
+        .collect();
+    let frames = marker_starts.into_iter().find_map(|start| {
+        let mut fr = Vec::new();
+        let mut p = start;
+        while p + 6 <= s3_end {
+            let object = r.u16(p);
+            let duration_ms = r.u16(p + 2);
+            let bt = r.u16(p + 4);
+            p += 6;
+            if bt == 0x0100 {
+                p += 4; // end-of-list marker + count
+                continue;
+            }
+            if bt > 2 {
+                return None; // not the frame stream (or wrong start)
+            }
+            let branch = match bt {
+                1 => Branch::Jump(r.u16(p)),
+                2 => Branch::Probable {
+                    target: r.u16(p),
+                    weight: r.u16(p + 2),
+                },
+                _ => Branch::Next,
+            };
+            if bt != 0 {
+                p += 6;
+            }
+            fr.push(AnimFrame {
+                object,
+                duration_ms,
+                branch,
+            });
+        }
+        // Accept when the walk consumed the section (the last marker leaves a few bytes).
+        (p >= s3_end.saturating_sub(6) && !fr.is_empty()).then_some(fr)
+    });
+    let Some(frames) = frames else {
+        return (poses, Vec::new(), Vec::new());
+    };
+
+    // Actions: section[4] u16 stream of (actionId, count, firstFrame) triples. Find the run
+    // by scanning for the first triple sequence whose ids/frames all validate.
+    let s4 = sections[4] as usize;
+    let s4_end = sections[5] as usize;
+    let nframes = frames.len() as u16;
+    let valid = |aid: u16| action_name(aid).is_some();
+    let mut actions = Vec::new();
+    let mut best: Vec<Action> = Vec::new();
+    let mut start = s4;
+    while start + 6 <= s4_end {
+        let mut acts = Vec::new();
+        let mut p = start;
+        while p + 6 <= s4_end {
+            let id = r.u16(p);
+            let count = r.u16(p + 2);
+            let first = r.u16(p + 4);
+            if !valid(id) || count == 0 || count > 64 || first >= nframes {
+                break;
+            }
+            acts.push(Action {
+                id,
+                name: action_name(id).unwrap().to_string(),
+                count,
+                first_frame: first,
+            });
+            p += 6;
+        }
+        if acts.len() > best.len() {
+            best = acts;
+        }
+        start += 2;
+    }
+    actions.append(&mut best);
+    (poses, frames, actions)
 }
 
 /// Minimal interpreter for the Windows Metafile subset used by actor cels: window

@@ -72,6 +72,32 @@ fn parses_and_renders_actor_files() {
         // WMF characters must have cels that render; bitmap/Mac ones legitimately have none.
         if act.image_format == CelFormat::Wmf {
             assert!(rendered > 0, "{}: no WMF cel rendered", path.display());
+
+            // Animation tables: poses, a frame graph, and named actions must decode, and a
+            // representative animation must composite to full character frames.
+            assert!(!act.poses.is_empty(), "{}: no poses", path.display());
+            assert!(!act.frames.is_empty(), "{}: no frames", path.display());
+            assert!(!act.actions.is_empty(), "{}: no actions", path.display());
+            // Every action starts within the frame graph, and all branch targets are valid.
+            let nframes = act.frames.len() as u16;
+            for a in &act.actions {
+                assert!(
+                    a.first_frame < nframes,
+                    "{}: {} start oob",
+                    path.display(),
+                    a.name
+                );
+            }
+            // Idle is present on Actor characters and must produce composited frames.
+            let idle = act.action("Idle").expect("Idle action");
+            let seq = act.action_sequence(idle, 128);
+            assert!(!seq.is_empty(), "{}: empty Idle sequence", path.display());
+            let (obj, _) = seq[0];
+            let frame = act
+                .render_object(obj as usize)
+                .unwrap_or_else(|| panic!("{}: render Idle frame", path.display()));
+            assert_eq!(frame.width, act.image_size.0 as u32);
+            assert_eq!(frame.height, act.image_size.1 as u32);
         }
 
         // Compressed (MNAK) bitmap cels must decompress to their declared size, with a

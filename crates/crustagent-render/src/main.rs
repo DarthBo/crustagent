@@ -674,7 +674,7 @@ fn main() {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("act"))
     {
-        run_act_viewer(&path, dry_run);
+        run_act_viewer(&path, positional.get(1).map(|s| s.as_str()), dry_run);
         return;
     }
 
@@ -776,10 +776,7 @@ fn main() {
 // Microsoft Actor (.act) viewer: flips through the character's rendered cels.
 // ---------------------------------------------------------------------------
 
-/// Milliseconds each cel is shown for in the Actor cel viewer.
-const ACT_CEL_MS: u64 = 120;
-
-fn run_act_viewer(path: &str, dry_run: bool) {
+fn run_act_viewer(path: &str, action_name: Option<&str>, dry_run: bool) {
     let act = ActFile::open(path).unwrap_or_else(|e| {
         eprintln!("parse {path}: {e}");
         std::process::exit(1);
@@ -791,32 +788,63 @@ fn run_act_viewer(path: &str, dry_run: bool) {
         );
         std::process::exit(1);
     }
-    let cels: Vec<Rgba> = (0..act.cels.len())
-        .filter_map(|i| act.render_cel(i))
-        .collect();
-    if cels.is_empty() {
+    if act.cels.is_empty() {
         eprintln!("{}: no renderable cels", act.name);
         std::process::exit(1);
     }
-    let canvas = (
-        cels.iter().map(|c| c.width).max().unwrap(),
-        cels.iter().map(|c| c.height).max().unwrap(),
-    );
-    println!(
-        "Actor {}: cycling {} cels in a {}x{} window (@{}x)",
-        act.name,
-        cels.len(),
-        canvas.0 * SCALE as u32,
-        canvas.1 * SCALE as u32,
-        SCALE
-    );
+
+    // Pick an action: the requested one, else Idle, else the first. Walk its frame graph
+    // and composite each frame's pose. If there are no actions, flip through the cels.
+    let action = action_name
+        .and_then(|n| act.action(n))
+        .or_else(|| act.action("Idle"))
+        .or_else(|| act.actions.first());
+    let frames: Vec<(Rgba, u64)> = match action {
+        Some(a) => {
+            let seq = act.action_sequence(a, 300);
+            println!(
+                "Actor {}: playing {:?} ({} frames)",
+                act.name,
+                a.name,
+                seq.len()
+            );
+            seq.iter()
+                .filter_map(|&(obj, dur)| {
+                    act.render_object(obj as usize)
+                        .map(|img| (img, (dur as u64).max(40)))
+                })
+                .collect()
+        }
+        None => {
+            println!(
+                "Actor {}: no actions — cycling {} cels",
+                act.name,
+                act.cels.len()
+            );
+            (0..act.cels.len())
+                .filter_map(|i| act.render_cel(i).map(|img| (img, 120u64)))
+                .collect()
+        }
+    };
+    if frames.is_empty() {
+        eprintln!("{}: nothing to render", act.name);
+        std::process::exit(1);
+    }
+    let canvas = (act.image_size.0 as u32, act.image_size.1 as u32);
     if dry_run {
+        println!(
+            "  {} frame(s) in a {}x{} window (@{}x)",
+            frames.len(),
+            canvas.0 * SCALE as u32,
+            canvas.1 * SCALE as u32,
+            SCALE
+        );
         return;
     }
 
     let mut app = ActApp {
         name: act.name,
-        cels,
+        frames,
         canvas,
         index: 0,
         last_advance: Instant::now(),
@@ -831,8 +859,9 @@ fn run_act_viewer(path: &str, dry_run: bool) {
 
 struct ActApp {
     name: String,
-    cels: Vec<Rgba>,
-    /// Shared canvas (largest cel) in unscaled pixels.
+    /// Composited animation frames, each with its on-screen duration in ms.
+    frames: Vec<(Rgba, u64)>,
+    /// Character frame size in unscaled pixels.
     canvas: (u32, u32),
     index: usize,
     last_advance: Instant,
@@ -842,16 +871,20 @@ struct ActApp {
 }
 
 impl ActApp {
-    /// Center the current cel (scaled by `SCALE`) on a `w`×`h` transparent buffer.
+    /// Center the current frame (scaled by `SCALE`) on a `w`×`h` transparent buffer.
     fn compose(&mut self, w: u32, h: u32) {
         self.scratch.clear();
         self.scratch.resize((w * h * 4) as usize, 0);
-        let img = &self.cels[self.index];
+        let img = &self.frames[self.index].0;
         let (cw, ch) = (img.width as i32, img.height as i32);
         let ox = (w as i32 - cw * SCALE) / 2;
         let oy = (h as i32 - ch * SCALE) / 2;
         let mut canvas = paint::Canvas::new(&mut self.scratch, w, h);
         canvas.blit_scaled(&img.pixels, cw, ch, ox, oy, SCALE);
+    }
+
+    fn current_delay(&self) -> u64 {
+        self.frames[self.index].1
     }
 }
 
@@ -900,15 +933,16 @@ impl ApplicationHandler for ActApp {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let now = Instant::now();
-        if now.duration_since(self.last_advance) >= Duration::from_millis(ACT_CEL_MS) {
-            self.index = (self.index + 1) % self.cels.len();
+        let delay = self.current_delay();
+        if now.duration_since(self.last_advance) >= Duration::from_millis(delay) {
+            self.index = (self.index + 1) % self.frames.len(); // loop the animation
             self.last_advance = now;
             if let Some(win) = self.window.as_ref() {
                 win.request_redraw();
             }
         }
         el.set_control_flow(ControlFlow::WaitUntil(
-            now + Duration::from_millis(ACT_CEL_MS),
+            now + Duration::from_millis(self.current_delay().min(delay)),
         ));
     }
 }
