@@ -39,7 +39,7 @@ fn build_acs() -> Vec<u8> {
     hb.extend_from_slice(&96u16.to_le_bytes()); // height
     hb.push(0); // transparency index
     hb.extend_from_slice(&0x0010_0000u32.to_le_bytes()); // style = Standard (no TTS/Balloon)
-    hb.extend_from_slice(&2u32.to_le_bytes()); // unknown
+    hb.extend_from_slice(&2u32.to_le_bytes()); // reserved (0x00000002 in samples)
                                                // palette: 2 entries (B,G,R,pad)
     hb.extend_from_slice(&2u32.to_le_bytes());
     hb.extend_from_slice(&[0, 0, 0, 0]); // index 0 -> black
@@ -90,17 +90,15 @@ fn build_acs() -> Vec<u8> {
     ar.extend_from_slice(&10u16.to_le_bytes()); // duration (cs)
     ar.extend_from_slice(&(-1i16).to_le_bytes()); // exit frame
     ar.push(0); // branch count
-    ar.push(1); // overlay count
-                // overlay (14 bytes): mouth Narrow, no replace, image 0
-    ar.push(MouthOverlay::Narrow as u8);
-    ar.push(0); // replace
-    ar.extend_from_slice(&0u16.to_le_bytes()); // image ndx
-    ar.push(0); // unknown
-    ar.push(0); // rgn flag
-    ar.extend_from_slice(&3i16.to_le_bytes()); // offset x
-    ar.extend_from_slice(&4i16.to_le_bytes()); // offset y
-    ar.extend_from_slice(&0i16.to_le_bytes()); // something x
-    ar.extend_from_slice(&0i16.to_le_bytes()); // something y
+    ar.push(1); // mouthOverlayCount
+                // mouth overlay (14 bytes) — see docs/acs-format.md §3.2.4
+    ar.push(MouthOverlay::Narrow as u8); // mouthState
+    ar.push(0); // flag
+    ar.extend_from_slice(&0u32.to_le_bytes()); // imageIndex
+    ar.extend_from_slice(&3i16.to_le_bytes()); // x
+    ar.extend_from_slice(&4i16.to_le_bytes()); // y
+    ar.extend_from_slice(&0i16.to_le_bytes()); // regionX
+    ar.extend_from_slice(&0i16.to_le_bytes()); // regionY
     let anim_size = ar.len();
     put_u32(&mut gb, anim_off_pos, anim_off as u32);
     put_u32(&mut gb, anim_size_pos, anim_size as u32);

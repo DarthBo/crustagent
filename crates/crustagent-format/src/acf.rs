@@ -110,7 +110,7 @@ mod tests {
         payload.extend_from_slice(&96u16.to_le_bytes()); // height
         payload.push(5); // transparency
         payload.extend_from_slice(&0x0010_0000u32.to_le_bytes()); // style = Standard
-        payload.extend_from_slice(&2u32.to_le_bytes()); // unknown
+        payload.extend_from_slice(&2u32.to_le_bytes()); // reserved (0x00000002 in samples)
                                                         // palette: 2 entries
         payload.extend_from_slice(&2u32.to_le_bytes());
         payload.extend_from_slice(&[0, 0, 0, 0]);
