@@ -231,9 +231,25 @@ fn parse_tag(chars: &[char], start: usize) -> Option<(Markup, usize)> {
             if name == "map" {
                 return parse_map(chars, value_start);
             }
-            let end = (value_start..chars.len()).find(|&i| chars[i] == '\\')?;
-            let value: String = chars[value_start..end].iter().collect();
-            let value = unquote(&value);
+            // The value runs to the closing delimiter. A literal backslash inside a tag's text
+            // parameter is doubled (§1.3), so `\\` is consumed as one character rather than
+            // read as the end of the tag.
+            let mut end = value_start;
+            let mut raw = String::new();
+            loop {
+                match *chars.get(end)? {
+                    '\\' if chars.get(end + 1) == Some(&'\\') => {
+                        raw.push('\\');
+                        end += 2;
+                    }
+                    '\\' => break,
+                    c => {
+                        raw.push(c);
+                        end += 1;
+                    }
+                }
+            }
+            let value = unquote(&raw);
             let tag = match name.as_str() {
                 "mrk" => Tag::Bookmark(value.parse().ok()?),
                 "pau" => Tag::Pause(number(value)?),
@@ -378,6 +394,18 @@ mod tests {
                 SpeechItem::Word("wow".into())
             ]
         );
+    }
+
+    #[test]
+    fn a_doubled_backslash_inside_a_value_is_not_the_end_of_the_tag() {
+        // §1.3: a literal backslash in a tag's text parameter is written `\\`.
+        let p = parse_speech(r#"\Ctx="a\\b"\x"#);
+        assert_eq!(
+            p.speech[0],
+            SpeechItem::Tag(Tag::Context(r"a\b".into())),
+            "the value runs past the doubled backslash to the real delimiter"
+        );
+        assert_eq!(p.display_words, ["x"]);
     }
 
     #[test]

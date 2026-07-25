@@ -470,6 +470,11 @@ fn frame_layers<'a>(
 /// Copy `image`'s non-key pixels onto `canvas` at `offset`, un-flipping the bottom-up DIB and
 /// clipping to the canvas (a layer may hang off any edge; a negative offset is legal).
 fn blit_indexed(canvas: &mut Indexed, image: &Image, offset: (i16, i16), transparency: u8) {
+    if image.bits.is_empty() {
+        // An absent record (a transparent placeholder) or one whose art failed to decode: there
+        // is nothing to draw, and its declared dimensions may be nonsense on a damaged file.
+        return;
+    }
     let stride = image.stride();
     let height = usize::from(image.height);
     for row in 0..height {

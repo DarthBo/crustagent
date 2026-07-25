@@ -18,11 +18,10 @@
 //!   (the Office 97/98 Assistants and Microsoft Bob), little- and big-endian. For the
 //!   vector-metafile characters it parses the full model — cels, poses (layered parts),
 //!   the frame graph, and named animations — and composites any frame to RGBA
-//!   ([`act::ActFile::render_object`]). Also decompresses the newer `MNAK` bitmap cels
-//!   (same LZ77 as ACS); their decompressed pixel body and the classic-Mac artwork codec
-//!   aren't decoded to pixels yet.
+//!   ([`act::ActFile::render_object`]). The bitmap characters decode too: the newer `MNAK`
+//!   cels through the same LZ77 as ACS, and the classic-Mac cels through their own codec.
 //!
-//! Planned: `.aca` bodies, ACD (text script), and the ACT bitmap-body/Mac artwork codecs.
+//! Planned: `.aca` bodies and ACD (text script).
 //!
 //! ```no_run
 //! use crustagent_format::AcsFile;

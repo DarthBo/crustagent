@@ -51,9 +51,9 @@ pub fn decode_data(src: &[u8], expected: usize) -> Result<Vec<u8>> {
 /// A stream that ends on its terminator before filling `expected` bytes yields what it
 /// produced — a few third-party characters ship individually truncated art, and the callers
 /// pad such an image with the color key rather than failing the whole character. One that runs
-/// slightly long is clipped to `expected` (see [`OVERRUN_SLACK`]). A stream that is not
-/// decodable at all (too short, not flagged compressed, out of bits before the terminator, a
-/// back-reference reaching behind the output, or output running away past `expected`) yields
+/// slightly long is clipped to `expected`, as the original's fixed-size raster was. One that is
+/// not decodable at all (too short, not flagged compressed, out of bits before the terminator,
+/// a back-reference reaching behind the output, or output running away past `expected`) yields
 /// nothing, which callers read as a blank image.
 pub fn decode_run(src: &[u8], expected: usize) -> Vec<u8> {
     lz77(src, expected).unwrap_or_default()
