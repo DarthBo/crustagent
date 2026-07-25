@@ -103,6 +103,9 @@ Implemented:
   sound extraction, and a **frame compositor** to RGBA/indexed.
 - **ACS 1.5** — the older **OLE2 compound-document** format (a `char.acf` header stream +
   one compressed stream per animation), normalized into the same `AcsFile`.
+
+  The `.acs` / `.acf` / `.aca` on-disk formats are documented in
+  [`docs/acs-format.md`](docs/acs-format.md).
 - **ACT** (`ActFile`) — the *Microsoft Actor* character table that preceded Agent (the
   Office 97/98 Assistants — Clippit, Rover, The Genius, Mother Nature, Will, Earl, Rocky,
   Bosgrove, Max, … — and Microsoft Bob), in both the little-endian PC and big-endian
