@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic randomness for frame-branch selection.
 //!
 //! The original engine calls `rand() % 100 + 1`. We abstract that behind [`BranchRng`]

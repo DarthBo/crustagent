@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Image bitstream decompression — the LZ77 codec of
 //! [`docs/acs-format.md`](../../../docs/acs-format.md) §4.
 //!

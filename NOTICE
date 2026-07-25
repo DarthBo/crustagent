@@ -1,10 +1,14 @@
 crustagent
 Copyright (C) 2025-2026 Tibault Damman and the crustagent authors
 
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU Lesser General Public License as published by the Free
-Software Foundation, either version 3 of the License, or (at your option) any
-later version. See the COPYING.LESSER and COPYING files for the full text.
+Licensed under either of
+
+  * Apache License, Version 2.0 (see LICENSE-APACHE)
+  * MIT license (see LICENSE-MIT)
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in this work by you shall be dual-licensed
+as above, without any additional terms or conditions.
 
 ================================================================================
 Derivation and attribution
@@ -19,6 +23,10 @@ character files. Those findings are written up in this repository as
 docs/acs-format.md (.acs / .acf / .aca) and docs/act-format.md (Microsoft Actor
 .act); the parsers, the image codec, the frame compositor and the animation
 sequencer are implemented from those documents.
+
+The speech-markup parser (crustagent-core, src/text.rs) implements the Speak()
+output-tag grammar of Microsoft's published Microsoft Agent API documentation, as
+written up in this repository as docs/speak-markup.md.
 
 Everything else — the embedding API and action queue (crustagent), the windowed
 renderer (crustagent-render), the text-to-speech and audio integration
@@ -47,3 +55,13 @@ crustagent depends on several third-party Rust crates, each distributed under
 its own license (predominantly MIT and/or Apache-2.0), including: winit, wgpu,
 pollster, rodio, tts, fontdue, fontdb, cfb, and font8x8. Their license terms
 apply to those components; consult each crate for details.
+
+Two notes for redistributors:
+
+  * crustagent-audio pulls in rodio, whose decoders come from the symphonia
+    family of crates, licensed MPL-2.0. MPL-2.0 is a per-file license: it governs
+    those crates' own files and does not affect the license of crustagent's code.
+    A build that does not use crustagent-audio does not include them at all.
+  * A few transitive crates are offered under a choice that includes LGPL-2.1
+    ("LGPL-2.1 OR MIT OR Apache-2.0"); crustagent's builds take the MIT or
+    Apache-2.0 option.

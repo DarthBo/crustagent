@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A minimal, dependency-free **animated GIF89a** encoder for palette-indexed frames.
 //!
 //! Microsoft Agent characters are a natural fit: they are 8-bpp palettized with a single

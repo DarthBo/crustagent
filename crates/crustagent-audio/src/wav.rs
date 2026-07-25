@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A small WAV decoder for the formats Microsoft Agent characters actually use: 8-/16-bit
 //! **PCM** and **MS-ADPCM** (`WAVE_FORMAT_ADPCM`, 0x0002) — the latter is what most Agent
 //! sound effects are stored as, and stock audio decoders don't handle it. Returns

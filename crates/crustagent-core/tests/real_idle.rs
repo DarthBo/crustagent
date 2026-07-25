@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Exercise the idle director against real characters (skips if none present).
 
 use crustagent_core::{Character, IdleDirector, SplitMix64};

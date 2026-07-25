@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Exercise the multi-part gesture helpers against real characters, when present under
 //! `assets/agents/` at the workspace root. Skips (passes) when no fixtures are found.
 

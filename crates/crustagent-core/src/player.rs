@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Drive an [`AnimationSequence`] against a monotonic clock.
 //!
 //! This is the piece that replaces the original's DirectShow playback: advance the player

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! ACS 1.5 reader — the older Microsoft Agent format, an **OLE2 compound document**
 //! (Structured Storage) rather than the flat blob of ACS 2.0
 //! ([`docs/acs-format.md`](../../../docs/acs-format.md) §6).

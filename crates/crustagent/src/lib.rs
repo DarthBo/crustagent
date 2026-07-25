@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # crustagent
 //!
 //! Embed a classic Microsoft Agent character in a Rust app. [`Agent`] owns a parsed

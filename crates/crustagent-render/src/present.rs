@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Presentation via `wgpu`: the composited frame is uploaded as a texture and drawn over
 //! a **transparent** surface (premultiplied-alpha composite mode), giving the borderless,
 //! per-pixel-transparent desktop window. Takes a window-sized top-down RGBA8 buffer.

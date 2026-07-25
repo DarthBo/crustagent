@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # crustagent-core
 //!
 //! The portable animation runtime for Microsoft Agent characters — the OS-independent

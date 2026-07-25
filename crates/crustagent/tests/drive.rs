@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Drive an Agent through its lifecycle against a real character (skips if absent).
 
 use crustagent::{Agent, AudioSink};

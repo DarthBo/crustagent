@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Dump a summary of an ACS 2.0 character file.
 //!
 //! Usage: `cargo run -p crustagent-format --example dump -- path/to/Character.acs`

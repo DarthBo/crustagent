@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Portable, engine-agnostic data model for an Agent character.
 //!
 //! These types are the parsed, in-memory representation shared by all file formats

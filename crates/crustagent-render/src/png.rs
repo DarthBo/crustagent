@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Minimal dependency-free PNG encoder (RGBA8, stored deflate) — used only by the
 //! `--balloon-png` debug path to inspect balloon rendering headlessly.
 

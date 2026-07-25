@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Integration test for the Microsoft Actor (`.act`) parser + WMF renderer against the
 //! real character files under `assets/agents/ACT` and `assets/agents/MAC_ACT`, if present.
 //! Skips (passes) when no fixtures are found, so the suite stays green in bare checkouts.

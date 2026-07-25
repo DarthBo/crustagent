@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A little-endian byte cursor with the primitive readers the Agent formats use.
 //!
 //! Everything is little-endian (the formats were authored on x86). Strings are

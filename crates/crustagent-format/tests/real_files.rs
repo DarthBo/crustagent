@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Integration test against real MS Agent characters, if they are present under
 //! `assets/agents/` at the workspace root. Skips (passes) when no fixtures are found,
 //! so the suite stays green in checkouts without bundled assets.

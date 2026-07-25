@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Parser and renderer for the **Actor Character Table** (`.act`) format — the character
 //! files used by *Microsoft Actor*, the mid-'90s predecessor to Microsoft Agent that
 //! powered the Office 97/98 Assistant (Clippit, Rover, The Genius, …) and Microsoft Bob.

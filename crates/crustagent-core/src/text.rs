@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Speech-text markup parser for Microsoft Agent `Speak`/`Think` strings.
 //!
 //! A `Speak` string mixes balloon text with inline backslash tags; parsing splits it into

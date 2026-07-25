@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Word-balloon text layout: wrap display words into lines, break only at word
 //! boundaries. Pure text math — pixel rendering (rounded rect, tail, font)
 //! lives in the renderer.

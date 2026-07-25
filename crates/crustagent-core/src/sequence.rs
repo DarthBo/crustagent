@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Flatten an [`Animation`]'s frame graph into a linear, timed playback sequence.
 //!
 //! This is the frame sequencer — the piece with the highest value to get right and

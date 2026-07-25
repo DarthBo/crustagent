@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A viewer that plays a Microsoft Agent character on the desktop, driven by the
 //! `crustagent` embedding API.
 //!

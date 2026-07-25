@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # crustagent-format
 //!
 //! Parsers for Microsoft Agent character files (`.acs`, and later `.acf`/`.acd`). This

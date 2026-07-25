@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Movement and pointing: choosing directional animation states and interpolating a
 //! character's screen position over time.
 //!

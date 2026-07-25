@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Export a Microsoft Actor (`.act`) animation to an animated GIF.
 //!
 //! Usage: `cargo run -p crustagent-core --example act_gif -- <file.act> [Action] [out.gif]`

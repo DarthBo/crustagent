@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Flatten a named animation into its timed playback sequence and print the timeline.
 //!
 //! Usage: `cargo run -p crustagent-core --example sequence -- <file.acs> <Animation> [seed]`

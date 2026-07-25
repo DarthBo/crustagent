@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A [`rodio`]-backed [`AudioSink`] for playing a character's embedded sound effects.
 //! Cross-platform (rodio → cpal: WASAPI / CoreAudio / ALSA). Fire-and-forget: each clip
 //! plays on its own detached sink so effects can overlap.

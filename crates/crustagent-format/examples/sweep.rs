@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Coverage sweep: open every `.acs` in a directory and report what we can't handle —
 //! parse errors/panics, image-decode failures, and unknown embedded-sound formats.
 //!

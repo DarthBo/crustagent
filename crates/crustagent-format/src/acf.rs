@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Parser for the Microsoft Agent ".acf" format — the *uncompiled*, web-distributable
 //! character: a small binary header file that references external ".aca" animation files
 //! by name ([`docs/acs-format.md`](../../../docs/acs-format.md) §7).

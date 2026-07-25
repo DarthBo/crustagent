@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Simple software drawing into a top-down RGBA8 buffer: scaled sprite blit and an 8x8
 //! bitmap font (via `font8x8`) for the menu. Word-balloon painting (rounded body, tails,
 //! anti-aliased TrueType text) lives in the `crustagent-balloon` crate.

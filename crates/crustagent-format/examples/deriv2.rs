@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use crustagent_format::{AcsFile, ActFile, Color};
 fn cube_fallback() -> Vec<(u8, u8, u8)> {
     let c = [255u8, 204, 153, 102, 51, 0];

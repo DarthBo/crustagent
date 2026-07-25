@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Composite a frame of an animation and write it to a PNG.
 //!
 //! Usage: `cargo run -p crustagent-format --example render -- <file.acs> <Animation> [frame] [out.png]`

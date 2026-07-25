@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Auto-idle behavior: when a character has nothing queued, it plays idle animations
 //! that escalate through `IDLINGLEVEL1` → `2` → `3` the longer it stays idle.
 //!

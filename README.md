@@ -189,7 +189,11 @@ The `.acs` format and the character artwork belong to Microsoft and the original
 authors; **no character assets are included in this repository**. crustagent's byte-level
 formats and playback rules were reverse-engineered from Microsoft's own runtime binaries and
 sample character files, documented in [`docs/acs-format.md`](docs/acs-format.md) and
-[`docs/act-format.md`](docs/act-format.md), and implemented from those documents. crustagent
-is licensed **LGPL-3.0-or-later** (see [`COPYING.LESSER`](COPYING.LESSER) +
-[`COPYING`](COPYING)) — so it can be linked from projects under other licenses; third-party
-notices are in [`NOTICE`](NOTICE).
+[`docs/act-format.md`](docs/act-format.md), and implemented from those documents. The
+speech-markup parser is implemented from Microsoft's published `Speak()` tag documentation,
+written up in [`docs/speak-markup.md`](docs/speak-markup.md).
+
+crustagent is licensed under either of **MIT** ([`LICENSE-MIT`](LICENSE-MIT)) or
+**Apache-2.0** ([`LICENSE-APACHE`](LICENSE-APACHE)), at your option — so it can be used from
+projects under any license. Contributions are accepted under the same dual license.
+Third-party notices are in [`NOTICE`](NOTICE).

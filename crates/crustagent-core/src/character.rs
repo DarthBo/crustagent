@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A thin runtime view over a parsed character file: name→animation and state→animation
 //! resolution plus convenience sequence builders.
 //!

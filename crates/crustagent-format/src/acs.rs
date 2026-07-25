@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Parser for the Microsoft Agent 2.0 compiled binary format (`.acs`).
 //!
 //! An `.acs` is a flat container: a 36-byte file header of four `(offset, size)` directory

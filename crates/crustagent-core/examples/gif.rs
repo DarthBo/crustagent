@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Export a named animation to an animated GIF (sequencer + index-space compositor).
 //!
 //! Usage: `cargo run -p crustagent-core --example gif -- <file.acs> <Animation> [seed] [out.gif]`

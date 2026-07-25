@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Pluggable text-to-speech for crustagent.
 //!
 //! Speech is modeled as an engine that, once told to [`speak`](TtsEngine::speak), emits a

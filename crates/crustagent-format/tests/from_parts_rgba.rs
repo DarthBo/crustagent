@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Build a character in memory from an RGBA image pool via [`AcsFile::from_parts_rgba`],
 //! then composite its frames and assert the RGBA path blits (and source-over-blends) the
 //! pool directly — no palette, no 1-bit transparency key.

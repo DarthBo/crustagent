@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! End-to-end test: hand-build a minimal but structurally complete ACS 2.0 file,
 //! then parse it and assert every section round-trips. This exercises the block
 //! directory, header, palette, states, names, gesture index, animation/frame parsing,
