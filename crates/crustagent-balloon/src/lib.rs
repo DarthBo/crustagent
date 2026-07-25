@@ -1,7 +1,7 @@
 //! # crustagent-balloon
 //!
 //! Software rendering for Microsoft Agent **word balloons** — the pixels behind
-//! [`crustagent_core::BalloonLayout`] / `crustagent::BalloonView`. Given the already-wrapped
+//! `crustagent_core::BalloonLayout` / `crustagent::BalloonView`. Given the already-wrapped
 //! lines, colors, and a speech-vs-think flag, it paints a rounded balloon (pointed speech
 //! tail or a trail of thought bubbles) — with antialiased edges and anti-aliased TrueType
 //! text (via `fontdue`, face discovered by `fontdb`) — into a top-down RGBA8 buffer. Colour
@@ -427,8 +427,8 @@ impl Canvas<'_> {
         if out_a == 0 {
             return;
         }
-        for k in 0..3 {
-            let s = rgb[k] as u32;
+        for (k, &channel) in rgb.iter().enumerate() {
+            let s = channel as u32;
             let d = self.buf[o + k] as u32;
             self.buf[o + k] = ((s * sa + d * da * (255 - sa) / 255) / out_a).min(255) as u8;
         }

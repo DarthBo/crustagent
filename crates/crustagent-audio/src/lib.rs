@@ -2,7 +2,8 @@
 //! Cross-platform (rodio → cpal: WASAPI / CoreAudio / ALSA). Fire-and-forget: each clip
 //! plays on its own detached sink so effects can overlap.
 //!
-//! We decode the WAV ourselves (see [`wav`]) — including **MS-ADPCM**, which most Agent
+//! We decode the WAV ourselves (in the crate's private `wav` module) — including
+//! **MS-ADPCM**, which most Agent
 //! sounds use and rodio's own decoder can't read — and hand rodio raw PCM samples.
 
 mod wav;

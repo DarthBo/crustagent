@@ -87,7 +87,6 @@ fn main() {
     let act = ActFile::open("assets/agents/MAC_ACT/Genius").unwrap();
     let acs = AcsFile::open("assets/agents/ACS/GENIUS.ACS").unwrap();
     let pal = &acs.header.palette;
-    let tr = acs.header.transparency as usize;
     let mut imgs = vec![];
     for j in 0..6000 {
         match acs.image(j) {
@@ -102,7 +101,7 @@ fn main() {
             continue;
         };
         let (w, h) = (w as usize, h as usize);
-        let stride = ((w + 3) / 4) * 4;
+        let stride = w.div_ceil(4) * 4;
         let mut best = (f64::MAX, 0usize);
         for (j, img) in imgs.iter().enumerate() {
             if img.width as usize != w || img.height as usize != h {

@@ -597,3 +597,20 @@ fn run_collect(agent: &mut Agent, ms: u32, out: &mut Vec<crustagent::Event>) {
         left -= dt;
     }
 }
+
+#[test]
+fn speaks_one_of_several_alternatives() {
+    let Some(mut agent) = merlin() else { return };
+    agent.show();
+    run(&mut agent, 2000);
+
+    // `a|b|c` offers alternatives; the agent speaks exactly one of them.
+    agent.speak("alpha|bravo charlie|delta echo foxtrot");
+    agent.update(16);
+    let b = agent.balloon().expect("balloon while speaking");
+    assert!(
+        [1, 2, 3].contains(&b.total_words),
+        "expected one alternative (1, 2 or 3 words), got {}",
+        b.total_words
+    );
+}

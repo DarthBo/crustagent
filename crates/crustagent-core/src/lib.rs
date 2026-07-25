@@ -46,4 +46,4 @@ pub use motion::{Direction, MoveTo};
 pub use player::Player;
 pub use rng::{BranchRng, SplitMix64};
 pub use sequence::{sequence_animation, sequence_exit, AnimationSequence, SeqFrame};
-pub use text::{parse_speech, ParsedSpeech, SpeechItem, Tag};
+pub use text::{parse_speech, pick_alternative, ParsedSpeech, SpeechItem, Tag};

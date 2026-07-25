@@ -94,7 +94,6 @@ fn main() {
                 None => eprintln!("cel {idx} failed to render"),
             }
         }
-        Some(other) => eprintln!("cel {idx} is {other:?}, not renderable yet"),
         None => eprintln!("no cel {idx} (have {})", act.cels.len()),
     }
 }

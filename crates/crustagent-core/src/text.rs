@@ -114,6 +114,25 @@ pub fn parse_speech(input: &str) -> ParsedSpeech {
     parsed
 }
 
+/// Choose one of a `Speak` string's alternatives (`docs/speak-markup.md` §6).
+///
+/// Vertical bars partition the text into alternatives, and the engine speaks one of them —
+/// chosen afresh every time the string is spoken, so a character does not repeat itself
+/// verbatim. `roll` is the caller's random value (any `u64`, reduced modulo the number of
+/// alternatives), which keeps the choice reproducible and testable; a string without a bar is
+/// returned unchanged.
+///
+/// This is a whole-string partition, exactly as documented: a `|` inside a tag value or a
+/// `\Map\` parameter also splits. Call it *before* [`parse_speech`], as the engine does.
+pub fn pick_alternative(input: &str, roll: u64) -> &str {
+    let count = input.matches('|').count() + 1;
+    if count == 1 {
+        return input;
+    }
+    let chosen = (roll % count as u64) as usize;
+    input.split('|').nth(chosen).unwrap_or(input)
+}
+
 /// Which stream(s) a run of text contributes its words to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sink {
@@ -393,6 +412,23 @@ mod tests {
                 SpeechItem::Tag(Tag::Emphasize),
                 SpeechItem::Word("wow".into())
             ]
+        );
+    }
+
+    #[test]
+    fn alternatives_are_partitioned_on_vertical_bars() {
+        // One alternative per roll, cycling through all of them.
+        let phrase = "Hello there|Hi|Good day";
+        assert_eq!(pick_alternative(phrase, 0), "Hello there");
+        assert_eq!(pick_alternative(phrase, 1), "Hi");
+        assert_eq!(pick_alternative(phrase, 2), "Good day");
+        assert_eq!(pick_alternative(phrase, 3), "Hello there", "roll wraps");
+        // No bar: the string is the only alternative, whatever the roll.
+        assert_eq!(pick_alternative("just this", 7), "just this");
+        // The chosen alternative is what gets parsed.
+        assert_eq!(
+            parse_speech(pick_alternative(r"one \Mrk=3\ two|three", 0)).display_words,
+            ["one", "two"]
         );
     }
 

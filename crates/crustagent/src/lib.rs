@@ -30,8 +30,8 @@
 use std::collections::VecDeque;
 
 use crustagent_core::{
-    parse_speech, sequence_animation, sequence_exit, wrap_last_rows, wrap_words, BalloonLayout,
-    Character, Direction, IdleDirector, MoveTo, SplitMix64,
+    parse_speech, pick_alternative, sequence_animation, sequence_exit, wrap_last_rows, wrap_words,
+    BalloonLayout, Character, Direction, IdleDirector, MoveTo, SplitMix64,
 };
 use crustagent_format::{char_style, AcsFile, ReturnKind};
 
@@ -488,6 +488,13 @@ impl Agent {
     pub fn play_looping(&mut self, animation: impl Into<String>) -> ReqId {
         self.request(Request::PlayLoop(animation.into()))
     }
+    /// Queue speech: a word balloon that reveals as the words are spoken, with the character
+    /// in its `SPEAKING` state.
+    ///
+    /// `text` is Microsoft `Speak()` markup — inline `\Tag\` directives (`\Mrk=N\` bookmarks,
+    /// `\Pau=N\`, `\Emp\`, `\Map="spoken"="shown"\`, …) are interpreted rather than displayed.
+    /// Vertical bars offer **alternatives** (`"Hello|Hi there|Good day"`): one is chosen at
+    /// random per call, so a repeated line does not come out verbatim every time.
     pub fn speak(&mut self, text: impl Into<String>) -> ReqId {
         self.request(Request::Speak(text.into()))
     }
@@ -507,7 +514,8 @@ impl Agent {
     /// Start a parallel balloon (see [`say_over`]/[`think_over`]): set up the balloon + a
     /// speech/think timer without queuing or changing the activity.
     fn begin_overlay_speech(&mut self, text: String, think: bool) {
-        let parsed = parse_speech(&text);
+        let text = pick_alternative(&text, self.rng.next_u64());
+        let parsed = parse_speech(text);
         let spoken = parsed.spoken_text();
         self.speak_mouth = None;
         let kind = if think {
@@ -864,7 +872,9 @@ impl Agent {
                 self.start_move(dir.move_state());
             }
             Request::Speak(text) => {
-                let parsed = parse_speech(&text);
+                // `a|b` offers alternatives; one is drawn per Speak, as the engine does.
+                let text = pick_alternative(&text, self.rng.next_u64());
+                let parsed = parse_speech(text);
                 let spoken = parsed.spoken_text();
                 self.speak_mouth = None;
                 self.begin_balloon(BalloonKind::Speak, parsed.display_words, parsed.bookmark_at);
@@ -873,7 +883,8 @@ impl Agent {
                 self.start_state("SPEAKING", true, Activity::Speak);
             }
             Request::Think(text) => {
-                let parsed = parse_speech(&text);
+                let text = pick_alternative(&text, self.rng.next_u64());
+                let parsed = parse_speech(text);
                 self.speak_mouth = None;
                 self.begin_balloon(BalloonKind::Think, parsed.display_words, parsed.bookmark_at);
                 // Silent pacing; keep the current pose (a Think has no dedicated state).
