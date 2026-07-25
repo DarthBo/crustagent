@@ -104,7 +104,7 @@ impl ParsedSpeech {
 /// A tag is lifted out of the text: most become a [`Tag`] in the speech stream at the point
 /// they appeared (so a backend applies them between words), `\Mrk=N\` additionally records its
 /// position in the balloon in [`ParsedSpeech::bookmark_at`], and `\Map="…"="…"\` splits the two
-/// halves apart — the first goes to the balloon, the second is parsed as speech. A tag always
+/// halves apart — the first is parsed as speech, the second goes to the balloon. A tag always
 /// ends the word it interrupts. `\\` and `\"` stand for a literal backslash and quote; a
 /// backslash sequence that is not one of the documented tags is literal text
 /// (`docs/speak-markup.md` §1.3–§1.4).
@@ -128,13 +128,9 @@ enum Sink {
 /// One piece of markup lifted out of the text.
 enum Markup {
     Tag(Tag),
-    /// `\Map="balloon"="spoken"\` (§2): display one thing, speak another.
-    ///
-    /// Note the parameter order: crustagent reads the **first** quoted string as the balloon
-    /// text and the second as the spoken text. `docs/speak-markup.md` §2 reads Microsoft's
-    /// documentation the other way round (spoken first) — if that turns out to be how real
-    /// characters are authored, only these two fields swap.
-    Map { balloon: String, spoken: String },
+    /// `\Map="spoken"="balloon"\` (§2): speak one thing, display another. The spoken text is
+    /// the first parameter, as in Microsoft's own example `\map="Spoken text"="Balloon text"\`.
+    Map { spoken: String, balloon: String },
 }
 
 /// Walk `input`, accumulating words into `out` and interpreting tags as they appear.
@@ -156,7 +152,7 @@ fn parse_stream(input: &str, out: &mut ParsedSpeech, sink: Sink) {
                 flush_word(&mut word, out, sink);
                 match markup {
                     Markup::Tag(tag) => push_tag(tag, out),
-                    Markup::Map { balloon, spoken } => {
+                    Markup::Map { spoken, balloon } => {
                         push_words(&balloon, out, Sink::DisplayOnly);
                         parse_stream(&spoken, out, Sink::SpeechOnly);
                     }
@@ -255,11 +251,12 @@ fn parse_tag(chars: &[char], start: usize) -> Option<(Markup, usize)> {
 }
 
 /// Parse the two quoted halves of a `\Map=` from `start` (just past the `=`), per §2: the
-/// first runs to `"=`, the second to `"\`, and a doubled `""` is a literal quote inside either.
+/// spoken text runs to `"=`, the balloon text to `"\`, and a doubled `""` is a literal quote
+/// inside either.
 fn parse_map(chars: &[char], start: usize) -> Option<(Markup, usize)> {
-    let (balloon, after_balloon) = map_parameter(chars, start, '=')?;
-    let (spoken, after_spoken) = map_parameter(chars, after_balloon, '\\')?;
-    Some((Markup::Map { balloon, spoken }, after_spoken))
+    let (spoken, after_spoken) = map_parameter(chars, start, '=')?;
+    let (balloon, after_balloon) = map_parameter(chars, after_spoken, '\\')?;
+    Some((Markup::Map { spoken, balloon }, after_balloon))
 }
 
 /// Read one `"…"`-quoted `Map` parameter starting at `chars[start]`, terminated by a quote
@@ -364,14 +361,15 @@ mod tests {
 
     #[test]
     fn map_splits_display_and_speech() {
-        let p = parse_speech(r#"\Map="Dr. Smith"="Doctor Smith"\ here"#);
+        // \Map="spoken"="balloon"\ — speak "Doctor", show "Dr.".
+        let p = parse_speech(r#"\Map="Doctor Smith"="Dr. Smith"\ here"#);
         assert_eq!(p.display_words, ["Dr.", "Smith", "here"]);
         assert_eq!(p.spoken_text(), "Doctor Smith here");
     }
 
     #[test]
     fn map_spoken_half_is_parsed_recursively() {
-        let p = parse_speech(r#"\Map="!"="\Emp\wow"\"#);
+        let p = parse_speech(r#"\Map="\Emp\wow"="!"\"#);
         assert_eq!(p.display_words, ["!"]);
         assert_eq!(
             p.speech,
