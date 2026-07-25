@@ -21,6 +21,12 @@ pub const ACS_SIGNATURE: u32 = 0xABCD_ABC3;
 /// The flat `.acs` writes the UTF-16 NUL terminator of every string to disk.
 const FLAT_STRINGS: StringForm = StringForm::Utf16Terminated;
 
+/// Shared message for the temporarily-stubbed frame compositor (see the clean-room note on
+/// [`AcsFile::composite_frame`]).
+const COMPOSITOR_STUBBED: &str =
+    "the frame compositor is being reimplemented clean-room (docs/acs-format.md §3.2.1) \
+     and is not yet available";
+
 /// The character-header versions this reader accepts, from the oldest 1.x stamp to 2.0
 /// (Appendix A). Files carrying anything else are either a newer format or — far more
 /// often — damaged: the corrupt characters in the wild keep a valid container magic and
@@ -378,133 +384,27 @@ impl AcsFile {
             .map(|i| &self.animations[i])
     }
 
-    /// Composite one frame into a top-down palette-indexed image the size of the
-    /// character. This is the core compositor.
+    /// Composite one frame into a top-down palette-indexed image the size of the character.
     ///
-    /// Mirrors the original compositor (8-bit path): the frame's base images are drawn
-    /// back-to-front (highest image index is the base layer, lower indices over it),
-    /// then, if `mouth` is given and the frame has a matching overlay, that mouth image
-    /// is drawn on top. A `replace` overlay suppresses base image index 0. The canvas is
-    /// pre-filled with the transparency index and transparent source pixels are skipped,
-    /// so lower layers (and the background) show through.
+    /// **Temporarily stubbed.** The compositor was carried over from the pre-relicense
+    /// GPL-derived code and is being reimplemented clean-room from the layering
+    /// rules in `docs/acs-format.md` §3.2.1; it currently returns [`Error::Unsupported`].
     pub fn composite_frame_indexed(
         &self,
         frame: &Frame,
         mouth: Option<MouthOverlay>,
     ) -> Result<Indexed> {
-        let (w, h) = self.header.image_size;
-        let mut canvas = Indexed::filled(w as u32, h as u32, self.header.transparency);
-
-        let overlay = mouth.and_then(|m| frame.overlays.iter().find(|o| o.overlay_type == m));
-        let replace_base = overlay.is_some_and(|o| o.replace);
-
-        // Base image stack: highest index (bottom) first, down to index 0 (topmost image).
-        for i in (0..frame.images.len()).rev() {
-            if i == 0 && replace_base {
-                continue;
-            }
-            let fi = frame.images[i];
-            let img = self.image(fi.image_ndx as usize)?;
-            self.blit(&mut canvas, &img, fi.offset);
-        }
-
-        // Mouth overlay on top.
-        if let Some(o) = overlay {
-            let img = self.image(o.image_ndx as usize)?;
-            self.blit(&mut canvas, &img, o.offset);
-        }
-
-        Ok(canvas)
+        let _ = (frame, mouth);
+        Err(Error::Unsupported(COMPOSITOR_STUBBED))
     }
 
     /// Composite one frame to top-down RGBA (transparency index → transparent pixel).
     ///
-    /// For a file built via [`from_parts_rgba`](AcsFile::from_parts_rgba) this alpha-blits
-    /// the RGBA pool directly (source-over); otherwise it composites through the 8-bpp
-    /// palette path and maps the result through the palette.
+    /// **Temporarily stubbed** during the clean-room rewrite of the compositor (see
+    /// [`composite_frame_indexed`](AcsFile::composite_frame_indexed)).
     pub fn composite_frame(&self, frame: &Frame, mouth: Option<MouthOverlay>) -> Result<Rgba> {
-        if let Some(pool) = &self.rgba_images {
-            return self.composite_frame_rgba(frame, mouth, pool);
-        }
-        Ok(self
-            .composite_frame_indexed(frame, mouth)?
-            .to_rgba(&self.header.palette))
-    }
-
-    /// RGBA compositing (mirrors [`composite_frame_indexed`]'s layering, but source-over on
-    /// true RGBA instead of index-keying): base images back-to-front (highest index is the
-    /// bottom layer), then the matching mouth overlay on top; a `replace` overlay suppresses
-    /// base image 0. `image_ndx` indexes the RGBA `pool`.
-    fn composite_frame_rgba(
-        &self,
-        frame: &Frame,
-        mouth: Option<MouthOverlay>,
-        pool: &[Rgba],
-    ) -> Result<Rgba> {
-        let (w, h) = self.header.image_size;
-        let mut canvas = Rgba::transparent(w as u32, h as u32);
-
-        let overlay = mouth.and_then(|m| frame.overlays.iter().find(|o| o.overlay_type == m));
-        let replace_base = overlay.is_some_and(|o| o.replace);
-
-        for i in (0..frame.images.len()).rev() {
-            if i == 0 && replace_base {
-                continue;
-            }
-            let fi = frame.images[i];
-            let src = pool.get(fi.image_ndx as usize).ok_or(Error::BadImage {
-                index: fi.image_ndx as usize,
-            })?;
-            alpha_over(&mut canvas, src, fi.offset);
-        }
-
-        if let Some(o) = overlay {
-            let src = pool.get(o.image_ndx as usize).ok_or(Error::BadImage {
-                index: o.image_ndx as usize,
-            })?;
-            alpha_over(&mut canvas, src, o.offset);
-        }
-
-        Ok(canvas)
-    }
-
-    /// Blit one 8-bpp image onto the top-down `Indexed` canvas at `offset`, skipping
-    /// transparent-index pixels.
-    ///
-    /// `offset` is the image's top-left position in **top-down** canvas space (matching
-    /// the original compositor, where a source pixel at visual row `v` lands at canvas
-    /// row `v + offset.y`). The image bits are a bottom-up DIB, so visual row `v` is stored
-    /// at scanline `height-1-v`. (Full-frame images use `offset ≈ (0,0)`, but smaller
-    /// sub-images — e.g. a separate head layer — depend on this being top-down.)
-    fn blit(&self, canvas: &mut Indexed, img: &Image, offset: (i16, i16)) {
-        let transparency = self.header.transparency;
-        let stride = img.stride();
-        let cw = canvas.width as i32;
-        let ch = canvas.height as i32;
-        let (off_x, off_y) = (offset.0 as i32, offset.1 as i32);
-
-        for v in 0..img.height as i32 {
-            let cy = v + off_y; // top-down canvas row
-            if cy < 0 || cy >= ch {
-                continue;
-            }
-            let src_row = (img.height as i32 - 1 - v) as usize * stride; // bottom-up scanline
-            for u in 0..img.width as i32 {
-                let cx = u + off_x;
-                if cx < 0 || cx >= cw {
-                    continue;
-                }
-                // Tolerate empty/truncated image data (some characters ship a 0-byte
-                // placeholder image): treat missing source pixels as transparent.
-                let Some(&idx) = img.bits.get(src_row + u as usize) else {
-                    continue;
-                };
-                if idx == transparency {
-                    continue;
-                }
-                canvas.indices[cy as usize * canvas.width as usize + cx as usize] = idx;
-            }
-        }
+        let _ = (frame, mouth);
+        Err(Error::Unsupported(COMPOSITOR_STUBBED))
     }
 }
 
@@ -820,47 +720,4 @@ fn read_media_table(data: &[u8], block: Extent, what: &'static str) -> Result<Ve
         c.skip(4)?;
     }
     Ok(entries)
-}
-
-/// Source-over composite a top-down RGBA `src` onto a top-down RGBA `canvas` at `offset`
-/// (non-premultiplied straight alpha). Pixels outside the canvas are clipped.
-fn alpha_over(canvas: &mut Rgba, src: &Rgba, offset: (i16, i16)) {
-    let cw = canvas.width as i32;
-    let ch = canvas.height as i32;
-    let (off_x, off_y) = (offset.0 as i32, offset.1 as i32);
-
-    for v in 0..src.height as i32 {
-        let cy = v + off_y;
-        if cy < 0 || cy >= ch {
-            continue;
-        }
-        for u in 0..src.width as i32 {
-            let cx = u + off_x;
-            if cx < 0 || cx >= cw {
-                continue;
-            }
-            let s = ((v * src.width as i32 + u) as usize) * 4;
-            let sa = src.pixels[s + 3] as u32;
-            if sa == 0 {
-                continue;
-            }
-            let d = ((cy * cw + cx) as usize) * 4;
-            if sa == 255 {
-                canvas.pixels[d..d + 4].copy_from_slice(&src.pixels[s..s + 4]);
-                continue;
-            }
-            // out = src + dst * (1 - src_a), straight alpha.
-            let da = canvas.pixels[d + 3] as u32;
-            let inv = 255 - sa;
-            let out_a = sa + da * inv / 255;
-            for k in 0..3 {
-                let sc = src.pixels[s + k] as u32;
-                let dc = canvas.pixels[d + k] as u32;
-                // Composite in straight-alpha space; guard the zero-alpha case.
-                let num = sc * sa + dc * da * inv / 255;
-                canvas.pixels[d + k] = if out_a == 0 { 0 } else { (num / out_a) as u8 };
-            }
-            canvas.pixels[d + 3] = out_a as u8;
-        }
-    }
 }
