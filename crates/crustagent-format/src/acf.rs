@@ -8,10 +8,8 @@
 //! are no `.acf`/`.aca` fixtures on hand to validate against — the header layout is a
 //! faithful port but unverified against a real file).
 
-use crate::decode::decode_data;
 use crate::error::{Error, Result};
-use crate::model::{char_style, Balloon, FileHeader, Name, State, Tts};
-use crate::reader::Cursor;
+use crate::model::{Balloon, FileHeader, Name, State, Tts};
 
 /// First DWORD of an ACF file.
 pub const ACF_SIGNATURE: u32 = 0xABCD_ABC4;
@@ -46,93 +44,23 @@ impl AcfFile {
     }
 
     /// Parse an in-memory `.acf` byte buffer.
+    ///
+    /// **Temporarily stubbed.** The ACF header parser shared its byte-level readers with the
+    /// ACS parser, which is being reimplemented clean-room (see [`crate::acs`]); it currently
+    /// returns [`Error::Unsupported`] after validating the signature.
     pub fn parse(data: Vec<u8>) -> Result<AcfFile> {
-        let mut head = Cursor::new(&data);
-        let sig = head.u32()?;
-        if sig != ACF_SIGNATURE {
-            return Err(Error::BadSignature { found: sig });
+        match crate::acs::signature(&data) {
+            Some(ACF_SIGNATURE) => Err(Error::Unsupported(
+                "the .acf header parser is being reimplemented clean-room and is not yet available",
+            )),
+            Some(found) => Err(Error::BadSignature { found }),
+            None => Err(Error::UnexpectedEof {
+                context: "signature",
+                offset: 0,
+                needed: 4,
+                available: data.len(),
+            }),
         }
-        let uncompressed = head.u32()? as usize;
-        let compressed = head.u32()? as usize;
-
-        // Header payload: raw when compressedSize == 0, else DecodeData-compressed.
-        let payload: Vec<u8> = if compressed == 0 {
-            data.get(12..12 + uncompressed)
-                .ok_or(Error::UnexpectedEof {
-                    context: "acf payload",
-                    offset: 12,
-                    needed: uncompressed,
-                    available: data.len().saturating_sub(12),
-                })?
-                .to_vec()
-        } else {
-            let src = data.get(12..12 + compressed).ok_or(Error::UnexpectedEof {
-                context: "acf compressed payload",
-                offset: 12,
-                needed: compressed,
-                available: data.len().saturating_sub(12),
-            })?;
-            decode_data(src, uncompressed)?
-        };
-
-        let mut c = Cursor::new(&payload);
-        let version_minor = c.u16()?;
-        let version_major = c.u16()?;
-
-        let anim_count = c.u16()?;
-        let mut animations = Vec::with_capacity(anim_count as usize);
-        for _ in 0..anim_count {
-            // ACF strings are NOT null-terminated.
-            let name = c.string(false)?;
-            let file_name = c.string(false)?;
-            let return_name = c.string(false)?;
-            let checksum = c.u32()?;
-            animations.push(AcfAnimationRef {
-                name,
-                file_name,
-                return_name,
-                checksum,
-            });
-        }
-
-        let guid = c.guid()?;
-        let names = crate::blocks::names(&mut c, false)?;
-        let width = c.u16()?;
-        let height = c.u16()?;
-        let transparency = c.u8()?;
-        let style = c.u32()?;
-        let _unknown = c.u32()?; // always 2
-
-        let tts = if style & char_style::TTS != 0 {
-            Some(crate::blocks::tts(&mut c, false)?)
-        } else {
-            None
-        };
-        let balloon = if style & char_style::BALLOON != 0 {
-            Some(crate::blocks::balloon(&mut c, false)?)
-        } else {
-            None
-        };
-        let palette = crate::blocks::palette(&mut c)?;
-        crate::blocks::skip_icon(&mut c)?;
-        let states = crate::blocks::states(&mut c, false)?;
-
-        Ok(AcfFile {
-            header: FileHeader {
-                version_major,
-                version_minor,
-                guid,
-                image_size: (width, height),
-                transparency,
-                style,
-                palette,
-            },
-            tts,
-            balloon,
-            names,
-            states,
-            animations,
-        })
     }
 
     /// The default (US-English preferred, else first) character name.
@@ -160,6 +88,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ACF header parser stubbed during clean-room rewrite (see crate::acs)"]
     fn parses_synthetic_acf_header() {
         let mut payload = Vec::new();
         payload.extend_from_slice(&0u16.to_le_bytes()); // version minor

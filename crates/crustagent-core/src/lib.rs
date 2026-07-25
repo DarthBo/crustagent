@@ -17,14 +17,15 @@
 //! Planned: the serial action queue.
 //!
 //! ```
-//! use crustagent_core::{sequence_animation, Player, SplitMix64};
-//! # use crustagent_format::{Animation, Frame, ReturnKind};
-//! # let anim = Animation { name: "x".into(), return_kind: ReturnKind::None,
-//! #   return_name: String::new(),
-//! #   frames: vec![Frame { duration: 10, sound_ndx: -1, exit_frame: -1,
-//! #     branching: vec![], images: vec![], overlays: vec![] }] };
-//! let mut rng = SplitMix64::new(0);
-//! let seq = sequence_animation(&anim, &mut rng);
+//! use crustagent_core::{AnimationSequence, Player, SeqFrame};
+//! // A one-frame timeline. (The branch/graph *sequencer* — [`sequence_animation`] — is
+//! // being reimplemented clean-room, so build the [`AnimationSequence`] directly here.)
+//! let seq = AnimationSequence {
+//!     frames: vec![SeqFrame { frame: 0, start_cs: 0, duration_cs: 10 }],
+//!     total_cs: 10,
+//!     loop_start_cs: None,
+//!     truncated: false,
+//! };
 //! let mut player = Player::new(seq);
 //! assert_eq!(player.current_frame(), Some(0));
 //! ```

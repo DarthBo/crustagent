@@ -40,6 +40,9 @@ pub enum Error {
     },
     /// A value in the file was out of the expected range.
     InvalidData(String),
+    /// The format is recognized but its reader is not currently available — the ACS/ACF
+    /// parser layer is being reimplemented clean-room and is temporarily stubbed out.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -63,6 +66,7 @@ impl fmt::Display for Error {
                 write!(f, "image decode produced {got} bytes, expected {expected}")
             }
             Error::InvalidData(msg) => write!(f, "invalid data: {msg}"),
+            Error::Unsupported(what) => write!(f, "unsupported: {what}"),
         }
     }
 }

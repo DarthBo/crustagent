@@ -36,7 +36,6 @@ pub mod acf;
 pub mod acs;
 pub mod acs_v15;
 pub mod act;
-mod blocks;
 pub mod decode;
 pub mod error;
 pub mod model;

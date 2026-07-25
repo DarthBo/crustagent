@@ -1,33 +1,29 @@
 //! Parser for the Microsoft Agent 2.0 compiled binary format (`.acs`).
 //!
-//! Reverse-engineered from the original compiled binary format.
+//! **Status:** the byte-level parser is being reimplemented from scratch (clean-room, from
+//! [`docs/acs-format.md`](../../../docs/acs-format.md)) so the crate can be relicensed. The
+//! public type ([`AcsFile`]), the in-memory constructors ([`AcsFile::from_parts`] /
+//! [`AcsFile::from_parts_rgba`]) and the frame compositor are the original, unaffected code;
+//! only [`AcsFile::parse`] (and the lazy `.acs`-blob image reader) are stubbed out until the
+//! rewrite lands, and return [`Error::Unsupported`].
 
 use crate::error::{Error, Result};
 use crate::model::*;
-use crate::reader::Cursor;
+
+/// Shared message for the temporarily-stubbed `.acs` reader.
+const PARSER_STUBBED: &str =
+    "the .acs byte-level parser is being reimplemented clean-room and is not yet available; \
+     build characters via AcsFile::from_parts / from_parts_rgba in the meantime";
 
 /// First DWORD of an ACS 2.0 file.
 pub const ACS_SIGNATURE: u32 = 0xABCD_ABC3;
 
-/// A `{file offset, byte length}` descriptor from the block directory.
-#[derive(Clone, Copy, Debug)]
-struct Block {
-    offset: usize,
-    len: usize,
-}
-
-impl Block {
-    fn range(&self) -> std::ops::Range<usize> {
-        self.offset..self.offset + self.len
-    }
-}
-
 /// A parsed ACS 2.0 character file.
 ///
-/// The header, names, states and all animations are parsed eagerly; images and sounds
-/// are decoded on demand via [`AcsFile::image`] / [`AcsFile::sound`].
+/// While the byte-level parser is being reimplemented, an `AcsFile` is built in memory from
+/// already-decoded parts ([`AcsFile::from_parts`] / [`AcsFile::from_parts_rgba`]); its images
+/// and sounds live in the pre-decoded pools below.
 pub struct AcsFile {
-    data: Vec<u8>,
     pub header: FileHeader,
     pub tts: Option<Tts>,
     pub balloon: Option<Balloon>,
@@ -36,11 +32,8 @@ pub struct AcsFile {
     /// Animation names in file order (parallel to `animations`).
     pub gesture_names: Vec<String>,
     pub animations: Vec<Animation>,
-    image_index: Vec<Block>,
-    sound_index: Vec<Block>,
-    /// Pre-decoded image/sound pools (ACS 1.5, whose data comes from OLE2 streams rather
-    /// than a single mmap'd blob). When `Some`, they take precedence over the lazy
-    /// index-into-`data` path used by ACS 2.0.
+    /// Pre-decoded 8-bpp image / WAV sound pools. (When the ACS 2.0 blob parser returns, it
+    /// will populate these — or reintroduce a lazy index — behind this same public surface.)
     images: Option<Vec<Image>>,
     sounds: Option<Vec<Vec<u8>>>,
     /// A pre-decoded **RGBA** image pool for characters built in memory from already-RGBA
@@ -63,6 +56,10 @@ impl AcsFile {
     }
 
     /// Parse an in-memory `.acs` byte buffer.
+    ///
+    /// **Temporarily stubbed.** The byte-level ACS/ACF parser is being rewritten clean-room
+    /// (see the module docs) and currently returns [`Error::Unsupported`]. The signature is
+    /// validated first so callers still get [`Error::BadSignature`] for a non-ACS buffer.
     pub fn parse(data: Vec<u8>) -> Result<AcsFile> {
         let sig = signature(&data).ok_or(Error::UnexpectedEof {
             context: "signature",
@@ -70,49 +67,10 @@ impl AcsFile {
             needed: 4,
             available: data.len(),
         })?;
-        if sig == crate::acs_v15::OLE2_SIGNATURE {
-            return crate::acs_v15::parse_v15(data);
-        }
-        if sig != ACS_SIGNATURE {
+        if sig != ACS_SIGNATURE && sig != crate::acs_v15::OLE2_SIGNATURE {
             return Err(Error::BadSignature { found: sig });
         }
-
-        // Block directory: four {offset,length} descriptors at 4, 12, 20, 28.
-        let blocks = {
-            let mut c = Cursor::at(&data, 4);
-            let mut b = [Block { offset: 0, len: 0 }; 4];
-            for slot in &mut b {
-                let v = c.u64()?;
-                *slot = Block {
-                    offset: (v & 0xFFFF_FFFF) as usize,
-                    len: (v >> 32) as usize,
-                };
-            }
-            b
-        };
-        let (header_blk, gestures_blk, images_blk, sounds_blk) =
-            (blocks[0], blocks[1], blocks[2], blocks[3]);
-
-        let hb = parse_header_block(&data, header_blk)?;
-        let (gesture_names, animations) = parse_gestures(&data, gestures_blk)?;
-        let image_index = parse_index(&data, images_blk)?;
-        let sound_index = parse_index(&data, sounds_blk)?;
-
-        Ok(AcsFile {
-            data,
-            header: hb.header,
-            tts: hb.tts,
-            balloon: hb.balloon,
-            names: hb.names,
-            states: hb.states,
-            gesture_names,
-            animations,
-            image_index,
-            sound_index,
-            images: None,
-            sounds: None,
-            rgba_images: None,
-        })
+        Err(Error::Unsupported(PARSER_STUBBED))
     }
 
     /// Assemble an [`AcsFile`] from already-decoded parts (used by the ACS 1.5 reader,
@@ -130,7 +88,6 @@ impl AcsFile {
         sounds: Vec<Vec<u8>>,
     ) -> AcsFile {
         AcsFile {
-            data: Vec::new(),
             header,
             tts,
             balloon,
@@ -138,8 +95,6 @@ impl AcsFile {
             states,
             gesture_names,
             animations,
-            image_index: Vec::new(),
-            sound_index: Vec::new(),
             images: Some(images),
             sounds: Some(sounds),
             rgba_images: None,
@@ -197,7 +152,6 @@ impl AcsFile {
         sounds: Vec<Vec<u8>>,
     ) -> AcsFile {
         AcsFile {
-            data: Vec::new(),
             header,
             tts,
             balloon,
@@ -205,8 +159,6 @@ impl AcsFile {
             states,
             gesture_names,
             animations,
-            image_index: Vec::new(),
-            sound_index: Vec::new(),
             images: None,
             sounds: Some(sounds),
             rgba_images: Some(images),
@@ -239,40 +191,28 @@ impl AcsFile {
         if let Some(rgba) = &self.rgba_images {
             return rgba.len();
         }
-        match &self.images {
-            Some(imgs) => imgs.len(),
-            None => self.image_index.len(),
-        }
+        self.images.as_ref().map_or(0, Vec::len)
     }
 
-    /// Decode image `index` to its 8-bpp palette-index bits.
+    /// Fetch image `index` from the pre-decoded 8-bpp pool.
+    ///
+    /// (The lazy decode-from-`.acs`-blob path was part of the byte-level parser and is
+    /// stubbed during the clean-room rewrite; in-memory characters carry a decoded pool.)
     pub fn image(&self, index: usize) -> Result<Image> {
-        if let Some(imgs) = &self.images {
-            return imgs.get(index).cloned().ok_or(Error::BadImage { index });
+        match &self.images {
+            Some(imgs) => imgs.get(index).cloned().ok_or(Error::BadImage { index }),
+            None => Err(Error::Unsupported(PARSER_STUBBED)),
         }
-        let blk = self
-            .image_index
-            .get(index)
-            .copied()
-            .ok_or(Error::BadImage { index })?;
-        read_image(&self.data, blk.offset, index, self.header.transparency)
     }
 
     /// Number of sounds in the sound table.
     pub fn sound_count(&self) -> usize {
-        match &self.sounds {
-            Some(snds) => snds.len(),
-            None => self.sound_index.len(),
-        }
+        self.sounds.as_ref().map_or(0, Vec::len)
     }
 
     /// Borrow the raw bytes of sound `index` (a complete standalone WAV file).
     pub fn sound(&self, index: usize) -> Option<&[u8]> {
-        if let Some(snds) = &self.sounds {
-            return snds.get(index).map(|v| v.as_slice());
-        }
-        let blk = self.sound_index.get(index)?;
-        self.data.get(blk.range())
+        self.sounds.as_ref()?.get(index).map(|v| v.as_slice())
     }
 
     /// Find an animation by name. Matching is **case-insensitive** to mirror the engine
@@ -457,267 +397,4 @@ fn alpha_over(canvas: &mut Rgba, src: &Rgba, offset: (i16, i16)) {
             canvas.pixels[d + 3] = out_a as u8;
         }
     }
-}
-
-/// The fully-parsed contents of the header block (block[0]).
-struct HeaderBlock {
-    header: FileHeader,
-    tts: Option<Tts>,
-    balloon: Option<Balloon>,
-    names: Vec<Name>,
-    states: Vec<State>,
-}
-
-fn parse_header_block(data: &[u8], blk: Block) -> Result<HeaderBlock> {
-    let block = data.get(blk.range()).ok_or(Error::UnexpectedEof {
-        context: "header block",
-        offset: blk.offset,
-        needed: blk.len,
-        available: data.len().saturating_sub(blk.offset),
-    })?;
-    let mut c = Cursor::new(block);
-
-    let version_minor = c.u16()?;
-    let version_major = c.u16()?;
-    // The character-info block should open with a small version (Agent 2.x). A wild value
-    // means the block isn't the plain layout we expect — in practice a handful of
-    // third-party files ship this region encrypted/obfuscated. Fail clearly rather than
-    // cascading into a bogus multi-gigabyte string length.
-    if version_major == 0 || version_major > 99 {
-        return Err(Error::InvalidData(format!(
-            "character-info block is unreadable (version reads as {version_major}.{version_minor}); \
-             it appears encrypted or is an unsupported variant"
-        )));
-    }
-    let names_offset_abs = c.u32()? as usize;
-    let _names_size = c.u32()?;
-    let guid = c.guid()?;
-    let width = c.u16()?;
-    let height = c.u16()?;
-    let transparency = c.u8()?;
-    let style = c.u32()?;
-    let _unknown = c.u32()?; // always 2
-
-    let tts = if style & char_style::TTS != 0 {
-        Some(crate::blocks::tts(&mut c, true)?)
-    } else {
-        None
-    };
-    let balloon = if style & char_style::BALLOON != 0 {
-        Some(crate::blocks::balloon(&mut c, true)?)
-    } else {
-        None
-    };
-    let palette = crate::blocks::palette(&mut c)?;
-    crate::blocks::skip_icon(&mut c)?;
-
-    // States occupy the cursor position through the start of names.
-    let states = crate::blocks::states(&mut c, true)?;
-
-    // Names live at an absolute file offset; rebase into the header block.
-    let names_offset = names_offset_abs
-        .checked_sub(blk.offset)
-        .ok_or_else(|| Error::InvalidData("names offset precedes header block".into()))?;
-    let names = {
-        let mut nc = Cursor::at(block, names_offset);
-        crate::blocks::names(&mut nc, true)?
-    };
-
-    let header = FileHeader {
-        version_major,
-        version_minor,
-        guid,
-        image_size: (width, height),
-        transparency,
-        style,
-        palette,
-    };
-    Ok(HeaderBlock {
-        header,
-        tts,
-        balloon,
-        names,
-        states,
-    })
-}
-
-fn parse_index(data: &[u8], blk: Block) -> Result<Vec<Block>> {
-    if blk.len == 0 {
-        return Ok(Vec::new());
-    }
-    let slice = data.get(blk.range()).ok_or(Error::UnexpectedEof {
-        context: "index block",
-        offset: blk.offset,
-        needed: blk.len,
-        available: data.len().saturating_sub(blk.offset),
-    })?;
-    let mut c = Cursor::new(slice);
-    let count = c.u32()? as usize;
-    let mut entries = Vec::with_capacity(count);
-    for _ in 0..count {
-        let offset = c.u32()? as usize;
-        let len = c.u32()? as usize;
-        let _checksum = c.u32()?;
-        entries.push(Block { offset, len });
-    }
-    Ok(entries)
-}
-
-fn parse_gestures(data: &[u8], blk: Block) -> Result<(Vec<String>, Vec<Animation>)> {
-    if blk.len == 0 {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let slice = data.get(blk.range()).ok_or(Error::UnexpectedEof {
-        context: "gesture block",
-        offset: blk.offset,
-        needed: blk.len,
-        available: data.len().saturating_sub(blk.offset),
-    })?;
-    let mut c = Cursor::new(slice);
-    let count = c.u32()? as usize;
-    let mut names = Vec::with_capacity(count);
-    let mut animations = Vec::with_capacity(count);
-    for _ in 0..count {
-        let name = c.string(true)?;
-        let anim_offset = c.u32()? as usize;
-        let anim_size = c.u32()? as usize;
-        let anim = parse_animation(data, anim_offset, anim_size, &name)?;
-        names.push(name);
-        animations.push(anim);
-    }
-    Ok((names, animations))
-}
-
-fn parse_animation(data: &[u8], offset: usize, size: usize, name_hint: &str) -> Result<Animation> {
-    let end = offset.saturating_add(size);
-    let slice = data
-        .get(offset..end.min(data.len()))
-        .ok_or(Error::UnexpectedEof {
-            context: "animation record",
-            offset,
-            needed: size,
-            available: data.len().saturating_sub(offset),
-        })?;
-    let mut c = Cursor::new(slice);
-
-    let name = c.string(true)?;
-    let return_kind = ReturnKind::from_u8(c.u8()?);
-    let return_name = c.string(true)?;
-    let frame_count = c.u16()?;
-
-    let mut frames = Vec::with_capacity(frame_count as usize);
-    for _ in 0..frame_count {
-        frames.push(parse_frame(&mut c)?);
-    }
-
-    let _ = name_hint; // name inside the record is authoritative; hint kept for debugging
-    Ok(Animation {
-        name,
-        return_kind,
-        return_name,
-        frames,
-    })
-}
-
-fn parse_frame(c: &mut Cursor) -> Result<Frame> {
-    let image_count = c.u16()?;
-    let mut images = Vec::with_capacity(image_count as usize);
-    for _ in 0..image_count {
-        let image_ndx = c.u32()?;
-        let off_x = c.i16()?;
-        let off_y = c.i16()?;
-        images.push(FrameImage {
-            image_ndx,
-            offset: (off_x, off_y),
-        });
-    }
-
-    let sound_ndx = c.i16()?;
-    let duration = c.u16()?;
-    let exit_frame = c.i16()?;
-
-    let branch_count = c.u8()? as usize;
-    let mut branching = Vec::new();
-    for i in 0..branch_count {
-        let raw = c.u32()?;
-        if i < 3 {
-            branching.push(Branch {
-                frame_ndx: (raw & 0xFFFF) as i16,
-                probability: (raw >> 16) as u16,
-            });
-        }
-    }
-
-    let overlay_count = c.u8()? as usize;
-    let mut overlays = Vec::with_capacity(overlay_count);
-    for _ in 0..overlay_count {
-        let overlay_type = MouthOverlay::from_u8(c.u8()?);
-        let replace = c.u8()? != 0;
-        let image_ndx = c.u16()?;
-        let _unknown = c.u8()?;
-        let _rgn_flag = c.u8()?;
-        let off_x = c.i16()?;
-        let off_y = c.i16()?;
-        let _something_x = c.i16()?;
-        let _something_y = c.i16()?;
-        overlays.push(FrameOverlay {
-            overlay_type,
-            image_ndx,
-            replace,
-            offset: (off_x, off_y),
-        });
-    }
-
-    Ok(Frame {
-        duration,
-        sound_ndx,
-        exit_frame,
-        branching,
-        images,
-        overlays,
-    })
-}
-
-fn read_image(data: &[u8], offset: usize, index: usize, transparency: u8) -> Result<Image> {
-    // A blank, zero-size image — the graceful result for empty/placeholder or malformed
-    // slots (some characters ship 1-byte image entries). Composites to nothing.
-    let blank = || Image {
-        index,
-        width: 0,
-        height: 0,
-        bits: Vec::new(),
-    };
-
-    let mut c = Cursor::at(data, offset);
-    let first_byte = c.u8()?;
-    let width = c.u16()?;
-    let height = c.u16()?;
-    let compressed = c.u8()?;
-    let byte_count = c.u32()? as usize;
-
-    // Placeholder/empty slot (leading flag byte 0, or degenerate dimensions).
-    if first_byte == 0 || width == 0 || height == 0 {
-        return Ok(blank());
-    }
-    // Truncated/garbage record whose payload runs past the file.
-    let Ok(payload) = c.bytes(byte_count) else {
-        return Ok(blank());
-    };
-
-    let expected = Image::expected_len(width, height);
-    let mut bits = if compressed != 0 {
-        crate::decode::decode_run(payload, expected)
-    } else {
-        payload.to_vec()
-    };
-    // A stream that ends early (or an under-long uncompressed record) is padded with the
-    // transparent index; the original engine likewise tolerates a short decode.
-    bits.resize(expected, transparency);
-
-    Ok(Image {
-        index,
-        width,
-        height,
-        bits,
-    })
 }
