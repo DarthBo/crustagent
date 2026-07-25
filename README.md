@@ -124,6 +124,10 @@ Implemented:
     (a keyframe plus delta frames composited over it), colored with the Macintosh system
     palette. `animate` handles the inter-frame compositing.
 
+  The complete on-disk format — container, all three artwork codecs, the object/pose/frame/
+  action tables, palettes, and the Microsoft-binary references it was reversed from — is
+  documented in [`docs/act-format.md`](docs/act-format.md).
+
 Not yet (nice-to-have): ACF (+ external `.aca`), ACD (text script), and a small set of files
 with an obfuscated/variant 2.0
 char-info block. Run the `sweep` example to audit a character library against the parser.
