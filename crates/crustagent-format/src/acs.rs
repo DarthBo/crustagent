@@ -21,12 +21,6 @@ pub const ACS_SIGNATURE: u32 = 0xABCD_ABC3;
 /// The flat `.acs` writes the UTF-16 NUL terminator of every string to disk.
 const FLAT_STRINGS: StringForm = StringForm::Utf16Terminated;
 
-/// Shared message for the temporarily-stubbed frame compositor (see the clean-room note on
-/// [`AcsFile::composite_frame`]).
-const COMPOSITOR_STUBBED: &str =
-    "the frame compositor is being reimplemented clean-room (docs/acs-format.md §3.2.1) \
-     and is not yet available";
-
 /// The character-header versions this reader accepts, from the oldest 1.x stamp to 2.0
 /// (Appendix A). Files carrying anything else are either a newer format or — far more
 /// often — damaged: the corrupt characters in the wild keep a valid container magic and
@@ -384,28 +378,164 @@ impl AcsFile {
             .map(|i| &self.animations[i])
     }
 
-    /// Composite one frame into a top-down palette-indexed image the size of the character.
+    /// Composite one frame into a top-down palette-indexed image the size of the character
+    /// (`docs/acs-format.md` §3.2.1, §3.3).
     ///
-    /// **Temporarily stubbed.** The compositor was carried over from the pre-relicense
-    /// GPL-derived code and is being reimplemented clean-room from the layering
-    /// rules in `docs/acs-format.md` §3.2.1; it currently returns [`Error::Unsupported`].
+    /// The frame's image layers are drawn **back-to-front**: the last entry is the base and
+    /// each earlier one lands on top of it, every layer at its own `(x, y)` offset within the
+    /// character frame. Layers are palette-indexed with a single color key, so compositing is
+    /// a copy that skips source pixels equal to `header.transparency` — that key is also what
+    /// the canvas starts out filled with, so whatever no layer covers stays transparent. Each
+    /// source image is a bottom-up DIB with 4-byte-aligned rows, so its last raster row is the
+    /// top scanline of the output.
+    ///
+    /// `mouth` picks one of the frame's lip-sync overlays (§3.2.4): the overlay whose type
+    /// matches is drawn last, on top of the layers — or, if it is flagged as replacing the
+    /// base, in place of the frame's topmost layer rather than over it. A frame with no
+    /// overlay for the requested mouth composites as if none was asked for.
+    ///
+    /// Not available for a character built by [`from_parts_rgba`](AcsFile::from_parts_rgba):
+    /// its art never had a palette to index into (use
+    /// [`composite_frame`](AcsFile::composite_frame)).
     pub fn composite_frame_indexed(
         &self,
         frame: &Frame,
         mouth: Option<MouthOverlay>,
     ) -> Result<Indexed> {
-        let _ = (frame, mouth);
-        Err(Error::Unsupported(COMPOSITOR_STUBBED))
+        let (width, height) = self.header.image_size;
+        let mut canvas = Indexed::filled(width.into(), height.into(), self.header.transparency);
+        let overlay = mouth_overlay(frame, mouth);
+        for layer in frame_layers(frame, overlay) {
+            let image = self.image(layer.image_ndx as usize)?;
+            blit_indexed(&mut canvas, &image, layer.offset, self.header.transparency);
+        }
+        Ok(canvas)
     }
 
-    /// Composite one frame to top-down RGBA (transparency index → transparent pixel).
+    /// Composite one frame to top-down RGBA, layered exactly as
+    /// [`composite_frame_indexed`](AcsFile::composite_frame_indexed) describes.
     ///
-    /// **Temporarily stubbed** during the clean-room rewrite of the compositor (see
-    /// [`composite_frame_indexed`](AcsFile::composite_frame_indexed)).
+    /// For palette art this is that indexed composite mapped through `header.palette`, with
+    /// the transparency index becoming a fully transparent pixel. For a character built from
+    /// RGBA art by [`from_parts_rgba`](AcsFile::from_parts_rgba) the pool is blended directly
+    /// instead — source-over with straight (non-premultiplied) alpha, so soft-edged art keeps
+    /// its partial alpha instead of collapsing onto a 1-bit color key.
     pub fn composite_frame(&self, frame: &Frame, mouth: Option<MouthOverlay>) -> Result<Rgba> {
-        let _ = (frame, mouth);
-        Err(Error::Unsupported(COMPOSITOR_STUBBED))
+        let Some(pool) = &self.rgba_images else {
+            let indexed = self.composite_frame_indexed(frame, mouth)?;
+            return Ok(indexed.to_rgba(&self.header.palette));
+        };
+        let (width, height) = self.header.image_size;
+        let mut canvas = Rgba::transparent(width.into(), height.into());
+        let overlay = mouth_overlay(frame, mouth);
+        for layer in frame_layers(frame, overlay) {
+            let index = layer.image_ndx as usize;
+            let source = pool.get(index).ok_or(Error::BadImage { index })?;
+            blit_rgba(&mut canvas, source, layer.offset);
+        }
+        Ok(canvas)
     }
+}
+
+/// The frame's lip-sync overlay for `mouth`, if it has one (§3.2.4).
+fn mouth_overlay(frame: &Frame, mouth: Option<MouthOverlay>) -> Option<&FrameOverlay> {
+    let mouth = mouth?;
+    frame
+        .overlays
+        .iter()
+        .find(|overlay| overlay.overlay_type == mouth)
+}
+
+/// The frame's layers in draw order: base first, topmost last, with the chosen mouth overlay
+/// appended (and the layer it replaces dropped).
+fn frame_layers<'a>(
+    frame: &'a Frame,
+    overlay: Option<&FrameOverlay>,
+) -> impl Iterator<Item = FrameImage> + 'a {
+    let replaces_base = overlay.is_some_and(|o| o.replace);
+    let images = frame
+        .images
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(move |&(i, _)| !(replaces_base && i == 0))
+        .map(|(_, layer)| *layer);
+    let mouth = overlay.map(|o| FrameImage {
+        image_ndx: o.image_ndx.into(),
+        offset: o.offset,
+    });
+    images.chain(mouth)
+}
+
+/// Copy `image`'s non-key pixels onto `canvas` at `offset`, un-flipping the bottom-up DIB and
+/// clipping to the canvas (a layer may hang off any edge; a negative offset is legal).
+fn blit_indexed(canvas: &mut Indexed, image: &Image, offset: (i16, i16), transparency: u8) {
+    let stride = image.stride();
+    let height = usize::from(image.height);
+    for row in 0..height {
+        let Some(y) = canvas_coord(offset.1, row, canvas.height) else {
+            continue;
+        };
+        // Bottom-up source: output row `row` reads raster row `height - 1 - row`.
+        let source_row = (height - 1 - row) * stride;
+        for column in 0..usize::from(image.width) {
+            let Some(x) = canvas_coord(offset.0, column, canvas.width) else {
+                continue;
+            };
+            match image.bits.get(source_row + column) {
+                Some(&index) if index != transparency => {
+                    canvas.indices[y * canvas.width as usize + x] = index;
+                }
+                // Outside the (possibly truncated) raster, or the color key: leave the canvas.
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Blend `source` onto `canvas` at `offset` with source-over, straight-alpha RGBA. Both images
+/// are top-down, so this is a straight row-for-row blend, clipped to the canvas.
+fn blit_rgba(canvas: &mut Rgba, source: &Rgba, offset: (i16, i16)) {
+    for row in 0..source.height as usize {
+        let Some(y) = canvas_coord(offset.1, row, canvas.height) else {
+            continue;
+        };
+        for column in 0..source.width as usize {
+            let Some(x) = canvas_coord(offset.0, column, canvas.width) else {
+                continue;
+            };
+            let s = (row * source.width as usize + column) * 4;
+            let Some(src) = source.pixels.get(s..s + 4) else {
+                continue;
+            };
+            let source_alpha = u32::from(src[3]);
+            if source_alpha == 0 {
+                continue; // nothing to contribute
+            }
+            let d = (y * canvas.width as usize + x) * 4;
+            let dst = &mut canvas.pixels[d..d + 4];
+            if source_alpha == 255 {
+                dst.copy_from_slice(src);
+                continue;
+            }
+            // out_a = sa + da*(1-sa); out_c = (sc*sa + dc*da*(1-sa)) / out_a.
+            let kept = u32::from(dst[3]) * (255 - source_alpha) / 255;
+            let alpha = source_alpha + kept;
+            for channel in 0..3 {
+                let weighted =
+                    u32::from(src[channel]) * source_alpha + u32::from(dst[channel]) * kept;
+                dst[channel] = ((weighted + alpha / 2) / alpha).min(255) as u8;
+            }
+            dst[3] = alpha.min(255) as u8;
+        }
+    }
+}
+
+/// Place pixel `pixel` of a layer drawn at `origin` on an axis of `extent` pixels, or `None`
+/// when it falls outside the canvas.
+fn canvas_coord(origin: i16, pixel: usize, extent: u32) -> Option<usize> {
+    let coord = i64::from(origin) + pixel as i64;
+    (coord >= 0 && coord < i64::from(extent)).then_some(coord as usize)
 }
 
 /// Everything the character info block carries (§2), before it is split across [`AcsFile`].
@@ -720,4 +850,221 @@ fn read_media_table(data: &[u8], block: Extent, what: &'static str) -> Result<Ve
         c.skip(4)?;
     }
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An image from top-down rows of palette indices, stored the way the format does: rows
+    /// bottom-up, padded to a 4-byte stride.
+    fn image(index: usize, rows: &[&[u8]]) -> Image {
+        let width = rows[0].len() as u16;
+        let height = rows.len() as u16;
+        let stride = (usize::from(width)).div_ceil(4) * 4;
+        let mut bits = Vec::new();
+        for row in rows.iter().rev() {
+            bits.extend_from_slice(row);
+            bits.resize(bits.len() + stride - row.len(), 0);
+        }
+        Image {
+            index,
+            width,
+            height,
+            bits,
+        }
+    }
+
+    /// A 4×3 character whose palette is `0` = transparent key, `1`..`3` = R/G/B.
+    fn character(images: Vec<Image>, frame: Frame) -> AcsFile {
+        let header = FileHeader {
+            version_major: 2,
+            version_minor: 0,
+            guid: Guid::NIL,
+            image_size: (4, 3),
+            transparency: 0,
+            style: 0,
+            palette: vec![
+                Color { r: 0, g: 0, b: 0 },
+                Color { r: 255, g: 0, b: 0 },
+                Color { r: 0, g: 255, b: 0 },
+                Color { r: 0, g: 0, b: 255 },
+            ],
+        };
+        let animation = Animation {
+            name: "Test".into(),
+            return_kind: ReturnKind::None,
+            return_name: String::new(),
+            frames: vec![frame],
+        };
+        AcsFile::from_parts(
+            header,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec!["Test".into()],
+            vec![animation],
+            images,
+            Vec::new(),
+        )
+    }
+
+    fn frame(images: Vec<FrameImage>, overlays: Vec<FrameOverlay>) -> Frame {
+        Frame {
+            duration: 10,
+            sound_ndx: -1,
+            exit_frame: -1,
+            branching: Vec::new(),
+            images,
+            overlays,
+        }
+    }
+
+    fn layer(image_ndx: u32, offset: (i16, i16)) -> FrameImage {
+        FrameImage { image_ndx, offset }
+    }
+
+    #[test]
+    fn un_flips_the_dib_and_places_the_layer_at_its_offset() {
+        let file = character(
+            vec![image(0, &[&[2, 2], &[1, 1]])],
+            frame(vec![layer(0, (1, 1))], Vec::new()),
+        );
+        let composed = file
+            .composite_frame_indexed(&file.animations[0].frames[0], None)
+            .unwrap();
+        // Top-down: the image's own top row (2,2) lands on the row its offset names.
+        assert_eq!(
+            composed.indices,
+            vec![
+                0, 0, 0, 0, //
+                0, 2, 2, 0, //
+                0, 1, 1, 0,
+            ]
+        );
+        // Mapped through the palette, the key is transparent and index 2 is opaque green.
+        let rgba = file
+            .composite_frame(&file.animations[0].frames[0], None)
+            .unwrap();
+        assert_eq!(&rgba.pixels[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&rgba.pixels[4 * 5..4 * 5 + 4], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn layers_back_to_front_and_keys_out_the_transparent_index() {
+        // The later entry is the base; the earlier one draws over it, and its key pixels let
+        // the base show through.
+        let file = character(
+            vec![
+                image(0, &[&[3, 0], &[0, 3]]),
+                image(1, &[&[1, 1], &[1, 1]]),
+            ],
+            frame(vec![layer(0, (0, 0)), layer(1, (0, 0))], Vec::new()),
+        );
+        let composed = file
+            .composite_frame_indexed(&file.animations[0].frames[0], None)
+            .unwrap();
+        assert_eq!(
+            composed.indices,
+            vec![
+                3, 1, 0, 0, //
+                1, 3, 0, 0, //
+                0, 0, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn clips_layers_that_hang_off_the_canvas() {
+        // Half off the top-left corner and half off the right edge.
+        let file = character(
+            vec![image(0, &[&[1, 2], &[3, 1]])],
+            frame(vec![layer(0, (-1, -1)), layer(0, (3, 2))], Vec::new()),
+        );
+        let composed = file
+            .composite_frame_indexed(&file.animations[0].frames[0], None)
+            .unwrap();
+        assert_eq!(
+            composed.indices,
+            vec![
+                1, 0, 0, 0, //
+                0, 0, 0, 0, //
+                0, 0, 0, 1,
+            ]
+        );
+    }
+
+    #[test]
+    fn draws_the_requested_mouth_over_the_frame() {
+        let mouth = |overlay_type, replace| FrameOverlay {
+            overlay_type,
+            image_ndx: 1,
+            replace,
+            offset: (0, 2),
+        };
+        let file = character(
+            vec![image(0, &[&[1, 1], &[1, 1]]), image(1, &[&[2, 2]])],
+            frame(
+                vec![layer(0, (0, 0))],
+                vec![mouth(MouthOverlay::Closed, false)],
+            ),
+        );
+        let frame = &file.animations[0].frames[0];
+
+        // No mouth asked for, or a mouth state this frame has no overlay for: base only.
+        for mouth in [None, Some(MouthOverlay::Wide1)] {
+            let composed = file.composite_frame_indexed(frame, mouth).unwrap();
+            assert_eq!(
+                composed.indices,
+                vec![
+                    1, 1, 0, 0, //
+                    1, 1, 0, 0, //
+                    0, 0, 0, 0,
+                ],
+                "{mouth:?}"
+            );
+        }
+
+        // The matching overlay draws on top of the layers, at its own offset.
+        let composed = file
+            .composite_frame_indexed(frame, Some(MouthOverlay::Closed))
+            .unwrap();
+        assert_eq!(
+            composed.indices,
+            vec![
+                1, 1, 0, 0, //
+                1, 1, 0, 0, //
+                2, 2, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_replacing_mouth_takes_the_place_of_the_base_layer() {
+        let file = character(
+            vec![image(0, &[&[1, 1], &[1, 1]]), image(1, &[&[2, 2]])],
+            frame(
+                vec![layer(0, (0, 0))],
+                vec![FrameOverlay {
+                    overlay_type: MouthOverlay::Narrow,
+                    image_ndx: 1,
+                    replace: true,
+                    offset: (0, 0),
+                }],
+            ),
+        );
+        let composed = file
+            .composite_frame_indexed(&file.animations[0].frames[0], Some(MouthOverlay::Narrow))
+            .unwrap();
+        // The frame's own image is gone — only the overlay remains.
+        assert_eq!(
+            composed.indices,
+            vec![
+                2, 2, 0, 0, //
+                0, 0, 0, 0, //
+                0, 0, 0, 0,
+            ]
+        );
+    }
 }

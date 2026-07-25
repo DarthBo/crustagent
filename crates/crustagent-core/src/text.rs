@@ -5,13 +5,17 @@
 //! directives for a TTS backend (a neutral [`Tag`] enum, so any backend — or none — can
 //! consume it).
 //!
-//! **Status: temporarily stubbed.** This parser was carried over from the pre-relicense
-//! GPL-derived code and is being reimplemented clean-room from Microsoft's
-//! *documented* `Speak()` markup grammar (the backslash tags — `\Mrk`, `\Pau`, `\Map`, …).
-//! [`parse_speech`] currently returns an empty [`ParsedSpeech`]; the [`Tag`] / [`SpeechItem`]
-//! / [`ParsedSpeech`] types below are unaffected.
+//! The grammar is Microsoft's `Speak()` output-tag markup, specified in
+//! [`docs/speak-markup.md`](../../../docs/speak-markup.md): `\Tag\` and `\Tag=value\`, an
+//! `=` separator, case-insensitive three-letter tag names, no whitespace inside the
+//! delimiters, `\\` for a literal backslash, and the eleven tags of that document's §4.
 
 /// A parsed inline directive from the speech stream.
+///
+/// The variants [`Deemphasize`](Tag::Deemphasize), [`Command`](Tag::Command),
+/// [`Engine`](Tag::Engine), [`Pronounce`](Tag::Pronounce) and [`Other`](Tag::Other) are not
+/// part of Microsoft Agent's tag set (`docs/speak-markup.md` §5) and so are never produced by
+/// [`parse_speech`]; they remain for callers that synthesize directives of their own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
     /// `\Mrk=N` — bookmark; the engine raises a callback when speech reaches it.
@@ -96,12 +100,202 @@ impl ParsedSpeech {
 
 /// Parse a `Speak`/`Think` string into display words and a speech stream.
 ///
-/// **Temporarily stubbed.** The markup parser was carried over from the pre-relicense
-/// GPL-derived code and is being reimplemented clean-room from Microsoft's
-/// documented `Speak()` markup grammar; it currently returns an empty [`ParsedSpeech`].
+/// Plain text is split on whitespace into words that both show in the balloon and are spoken.
+/// A tag is lifted out of the text: most become a [`Tag`] in the speech stream at the point
+/// they appeared (so a backend applies them between words), `\Mrk=N\` additionally records its
+/// position in the balloon in [`ParsedSpeech::bookmark_at`], and `\Map="…"="…"\` splits the two
+/// halves apart — the first goes to the balloon, the second is parsed as speech. A tag always
+/// ends the word it interrupts. `\\` and `\"` stand for a literal backslash and quote; a
+/// backslash sequence that is not one of the documented tags is literal text
+/// (`docs/speak-markup.md` §1.3–§1.4).
 pub fn parse_speech(input: &str) -> ParsedSpeech {
-    let _ = input;
-    ParsedSpeech::default()
+    let mut parsed = ParsedSpeech::default();
+    parse_stream(input, &mut parsed, Sink::Both);
+    parsed
+}
+
+/// Which stream(s) a run of text contributes its words to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sink {
+    /// Ordinary text: shown in the balloon and spoken.
+    Both,
+    /// The spoken half of a `\Map\` — spoken, never displayed.
+    SpeechOnly,
+    /// The balloon half of a `\Map\` — displayed, never spoken.
+    DisplayOnly,
+}
+
+/// One piece of markup lifted out of the text.
+enum Markup {
+    Tag(Tag),
+    /// `\Map="balloon"="spoken"\` (§2): display one thing, speak another.
+    ///
+    /// Note the parameter order: crustagent reads the **first** quoted string as the balloon
+    /// text and the second as the spoken text. `docs/speak-markup.md` §2 reads Microsoft's
+    /// documentation the other way round (spoken first) — if that turns out to be how real
+    /// characters are authored, only these two fields swap.
+    Map { balloon: String, spoken: String },
+}
+
+/// Walk `input`, accumulating words into `out` and interpreting tags as they appear.
+fn parse_stream(input: &str, out: &mut ParsedSpeech, sink: Sink) {
+    let chars: Vec<char> = input.chars().collect();
+    let mut word = String::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            // An escape stays inside the current word; a tag breaks it.
+            if let Some(&escaped @ ('\\' | '"')) = chars.get(i + 1) {
+                word.push(escaped);
+                i += 2;
+                continue;
+            }
+            if let Some((markup, next)) = parse_tag(&chars, i) {
+                flush_word(&mut word, out, sink);
+                match markup {
+                    Markup::Tag(tag) => push_tag(tag, out),
+                    Markup::Map { balloon, spoken } => {
+                        push_words(&balloon, out, Sink::DisplayOnly);
+                        parse_stream(&spoken, out, Sink::SpeechOnly);
+                    }
+                }
+                i = next;
+                continue;
+            }
+            // Not a known tag: the backslash is ordinary text (§1.4).
+        }
+        if c.is_whitespace() {
+            flush_word(&mut word, out, sink);
+        } else {
+            word.push(c);
+        }
+        i += 1;
+    }
+    flush_word(&mut word, out, sink);
+}
+
+/// Emit the word built so far, if any, and start a new one.
+fn flush_word(word: &mut String, out: &mut ParsedSpeech, sink: Sink) {
+    if word.is_empty() {
+        return;
+    }
+    if sink != Sink::SpeechOnly {
+        out.display_words.push(word.clone());
+    }
+    if sink != Sink::DisplayOnly {
+        out.speech.push(SpeechItem::Word(std::mem::take(word)));
+    }
+    word.clear();
+}
+
+/// Split `text` on whitespace and emit its words (no tag interpretation).
+fn push_words(text: &str, out: &mut ParsedSpeech, sink: Sink) {
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        flush_word(&mut word, out, sink);
+    }
+}
+
+/// Append a tag to the speech stream, noting where a bookmark falls in the balloon.
+fn push_tag(tag: Tag, out: &mut ParsedSpeech) {
+    if let Tag::Bookmark(id) = tag {
+        out.bookmark_at.push((id, out.display_words.len()));
+    }
+    out.speech.push(SpeechItem::Tag(tag));
+}
+
+/// Parse the tag starting at `chars[start]` (a backslash), returning it and the index just
+/// past its closing backslash. `None` if this is not one of the documented tags — including a
+/// well-formed-looking but unknown three-letter name, or a missing closing delimiter.
+fn parse_tag(chars: &[char], start: usize) -> Option<(Markup, usize)> {
+    // A tag name is exactly three single-byte letters, matched case-insensitively (§1.1–§1.2).
+    let name = chars.get(start + 1..start + 4)?;
+    if !name.iter().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let name: String = name.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let after_name = start + 4;
+
+    match *chars.get(after_name)? {
+        // Parameterless: \Emp\, \Rst\, \Lst\.
+        '\\' => {
+            let tag = match name.as_str() {
+                "emp" => Tag::Emphasize,
+                "rst" => Tag::Reset,
+                "lst" => Tag::RepeatLast,
+                _ => return None,
+            };
+            Some((Markup::Tag(tag), after_name + 1))
+        }
+        // Parameterized: \Tag=value\ — the separator is `=` and nothing else (§1.1).
+        '=' => {
+            let value_start = after_name + 1;
+            if name == "map" {
+                return parse_map(chars, value_start);
+            }
+            let end = (value_start..chars.len()).find(|&i| chars[i] == '\\')?;
+            let value: String = chars[value_start..end].iter().collect();
+            let value = unquote(&value);
+            let tag = match name.as_str() {
+                "mrk" => Tag::Bookmark(value.parse().ok()?),
+                "pau" => Tag::Pause(number(value)?),
+                "vol" => Tag::Volume(number(value)?),
+                "spd" => Tag::Speed(number(value)?),
+                "pit" => Tag::Pitch(number(value)?),
+                "ctx" => Tag::Context(value.to_string()),
+                "chr" => Tag::Voice(value.to_string()),
+                _ => return None,
+            };
+            Some((Markup::Tag(tag), end + 1))
+        }
+        _ => None,
+    }
+}
+
+/// Parse the two quoted halves of a `\Map=` from `start` (just past the `=`), per §2: the
+/// first runs to `"=`, the second to `"\`, and a doubled `""` is a literal quote inside either.
+fn parse_map(chars: &[char], start: usize) -> Option<(Markup, usize)> {
+    let (balloon, after_balloon) = map_parameter(chars, start, '=')?;
+    let (spoken, after_spoken) = map_parameter(chars, after_balloon, '\\')?;
+    Some((Markup::Map { balloon, spoken }, after_spoken))
+}
+
+/// Read one `"…"`-quoted `Map` parameter starting at `chars[start]`, terminated by a quote
+/// followed by `terminator`. Returns the unescaped text and the index past the terminator.
+fn map_parameter(chars: &[char], start: usize, terminator: char) -> Option<(String, usize)> {
+    if *chars.get(start)? != '"' {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut text = String::new();
+    loop {
+        let c = *chars.get(i)?;
+        // Only a quote *followed by the terminator* closes the parameter, which is what makes
+        // the doubled-quote escape work.
+        if c == '"' && chars.get(i + 1) == Some(&terminator) {
+            return Some((text.replace("\"\"", "\""), i + 2));
+        }
+        text.push(c);
+        i += 1;
+    }
+}
+
+/// Strip one layer of surrounding double quotes, as the server writes on string values
+/// (`\Chr="Whisper"\`).
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+/// A numeric tag parameter. Documented ranges are engine-dependent (§4), so the value is only
+/// clamped to what the [`Tag`] carries rather than range-checked.
+fn number(value: &str) -> Option<u32> {
+    let n: i64 = value.trim().parse().ok()?;
+    Some(n.clamp(0, u32::MAX.into()) as u32)
 }
 
 #[cfg(test)]
@@ -109,7 +303,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn plain_text() {
         let p = parse_speech("Hello there world");
         assert_eq!(p.display_words, ["Hello", "there", "world"]);
@@ -118,7 +311,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn escapes() {
         let p = parse_speech(r#"a\\b \"q\""#);
         // \\ -> \, \" -> " ; words split on whitespace
@@ -126,7 +318,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn bookmark_is_speech_only() {
         let p = parse_speech(r"Hi \Mrk=5\ there");
         assert_eq!(p.display_words, ["Hi", "there"]);
@@ -144,7 +335,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn value_tags() {
         let p = parse_speech(r"\Vol=32768\loud \Pau=250\ \Spd=140\fast");
         let tags: Vec<&Tag> = p
@@ -162,7 +352,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn toggle_tags() {
         let p = parse_speech(r"\Emp\Now \Rst\done");
         assert!(matches!(p.speech[0], SpeechItem::Tag(Tag::Emphasize)));
@@ -174,7 +363,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn map_splits_display_and_speech() {
         let p = parse_speech(r#"\Map="Dr. Smith"="Doctor Smith"\ here"#);
         assert_eq!(p.display_words, ["Dr.", "Smith", "here"]);
@@ -182,7 +370,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn map_spoken_half_is_parsed_recursively() {
         let p = parse_speech(r#"\Map="!"="\Emp\wow"\"#);
         assert_eq!(p.display_words, ["!"]);
@@ -196,7 +383,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "speech-markup parser stubbed during clean-room rewrite (see module docs)"]
     fn case_insensitive_and_unknown_is_literal() {
         // \MRK recognized regardless of case; \Foo is not a tag -> literal backslash text.
         let p = parse_speech(r"\mRk=1\ x \Foo\ y");

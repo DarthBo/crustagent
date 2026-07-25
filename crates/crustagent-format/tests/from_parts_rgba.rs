@@ -72,7 +72,6 @@ fn build() -> AcsFile {
 }
 
 #[test]
-#[ignore = "compositor stubbed during clean-room rewrite (AcsFile::composite_frame)"]
 fn composites_full_frame_rgba_directly() {
     let file = build();
     assert_eq!(file.image_count(), 2);
@@ -91,7 +90,6 @@ fn composites_full_frame_rgba_directly() {
 }
 
 #[test]
-#[ignore = "compositor stubbed during clean-room rewrite (AcsFile::composite_frame)"]
 fn transparent_source_leaves_canvas_clear() {
     // A fully-transparent image over the (transparent) canvas stays transparent —
     // exercises the sa == 0 skip.
@@ -124,7 +122,6 @@ fn transparent_source_leaves_canvas_clear() {
 }
 
 #[test]
-#[ignore = "compositor stubbed during clean-room rewrite (AcsFile::composite_frame)"]
 fn semi_transparent_over_blends() {
     // 50%-alpha white over an opaque-red base layer: base image is index 1 (bottom),
     // overlay image index 0 (top) — matches the highest-index-is-bottom convention.

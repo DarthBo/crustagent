@@ -23,7 +23,6 @@ fn act_files() -> Vec<PathBuf> {
 }
 
 #[test]
-#[ignore = "renders ACT bitmaps through the shared LZ codec (decode.rs), stubbed during clean-room rewrite"]
 fn parses_and_renders_actor_files() {
     let files = act_files();
     if files.is_empty() {

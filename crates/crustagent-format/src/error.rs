@@ -40,8 +40,8 @@ pub enum Error {
     },
     /// A value in the file was out of the expected range.
     InvalidData(String),
-    /// The format is recognized but its reader is not currently available — the ACS/ACF
-    /// parser layer is being reimplemented clean-room and is temporarily stubbed out.
+    /// The format or operation is recognized but not available — e.g. asking a character
+    /// built from RGBA art for its palette-indexed images.
     Unsupported(&'static str),
 }
 
