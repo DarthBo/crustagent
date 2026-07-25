@@ -16,12 +16,12 @@ these lovingly-made characters usable again wherever Rust runs.
 ## Lineage
 
 - **Microsoft Agent** (late-'90s/early-2000s) is the OG — the technology and the `.acs`
-  format we target.
-- **[DoubleAgent](https://sourceforge.net/projects/doubleagent/)** (Cinnamon Software) is a
-  faithful open-source Windows/C++ reimplementation. We used its source as the reference
-  for reverse-engineering the byte formats and playback behavior — huge thanks to it.
-- **crustagent** is a from-scratch, platform-independent Rust take: a reimplementation of a
-  reimplementation, aimed at modern apps rather than at reproducing every Windows detail.
+  format we target. Microsoft retired it after Windows Vista; the characters outlived it.
+- **crustagent** is a from-scratch, platform-independent Rust take, aimed at modern apps
+  rather than at reproducing every Windows detail. The file formats and playback rules were
+  reverse-engineered from Microsoft's own runtime binaries and written up as
+  [`docs/acs-format.md`](docs/acs-format.md) and [`docs/act-format.md`](docs/act-format.md);
+  the parsers and sequencer are implemented from those specs.
 
 ## Workspace layout
 
@@ -186,10 +186,10 @@ alpha) so the character floats on the desktop.
 ## Provenance & license
 
 The `.acs` format and the character artwork belong to Microsoft and the original character
-authors; **no character assets are included in this repository**. crustagent's format and
-behavior were reverse-engineered from — and in places ported from — the
-[DoubleAgent](https://sourceforge.net/projects/doubleagent/) source (Cinnamon Software
-Inc.), which is dual GPL/LGPL. Taking its LGPL option, crustagent is licensed
-**LGPL-3.0-or-later** (see [`COPYING.LESSER`](COPYING.LESSER) + [`COPYING`](COPYING)) — so
-it can be linked from projects under other licenses; attribution and third-party notices
-are in [`NOTICE`](NOTICE).
+authors; **no character assets are included in this repository**. crustagent's byte-level
+formats and playback rules were reverse-engineered from Microsoft's own runtime binaries and
+sample character files, documented in [`docs/acs-format.md`](docs/acs-format.md) and
+[`docs/act-format.md`](docs/act-format.md), and implemented from those documents. crustagent
+is licensed **LGPL-3.0-or-later** (see [`COPYING.LESSER`](COPYING.LESSER) +
+[`COPYING`](COPYING)) — so it can be linked from projects under other licenses; third-party
+notices are in [`NOTICE`](NOTICE).

@@ -1,18 +1,39 @@
 //! Parser for the Microsoft Agent ".acf" format — the *uncompiled*, web-distributable
 //! character: a small binary header file that references external ".aca" animation files
-//! by relative path. Reverse-engineered from the original ACF header format.
+//! by name ([`docs/acs-format.md`](../../../docs/acs-format.md) §7).
 //!
-//! This currently parses the **header** — identity, palette, TTS/balloon metadata, states,
-//! and the animation reference table (name → `.aca` file + checksum). Loading the frame /
-//! image / sound data out of the external `.aca` files is not yet implemented (and there
-//! are no `.acf`/`.aca` fixtures on hand to validate against — the header layout is a
-//! faithful port but unverified against a real file).
+//! The payload is the same family of sub-blocks as the flat `.acs` (identity, palette,
+//! voice, balloon, states, localized names), in a slightly different order, wrapped in a
+//! length-prefixed — usually LZ-compressed — envelope. It carries no art of its own: each
+//! animation entry names the `.aca` that holds its frames.
+//!
+//! This parses the **header**. Loading the frame/image/sound data out of the referenced
+//! `.aca` files is not implemented, and there are no `.acf`/`.aca` fixtures on hand, so
+//! unlike the `.acs` paths this layout is unconfirmed against a real file.
 
+use crate::acs::{
+    check_header_version, read_balloon, read_names, read_palette, read_states, read_tray_icon,
+    read_tts,
+};
+use crate::decode::decode_data;
 use crate::error::{Error, Result};
-use crate::model::{Balloon, FileHeader, Name, State, Tts};
+use crate::model::{char_style, Balloon, FileHeader, Name, State, Tts};
+use crate::reader::{Cursor, StringForm};
 
 /// First DWORD of an ACF file.
 pub const ACF_SIGNATURE: u32 = 0xABCD_ABC4;
+/// A flat `.acf` may also be stamped with this older variant of the signature.
+pub const ACF_SIGNATURE_ALT: u32 = 0xABCD_ABC2;
+/// Signature of the `char.acf` definition stream inside an OLE2-packaged `.acf`.
+pub const ACF_STREAM_SIGNATURE: u32 = 0xABCD_ABC1;
+
+/// `.acf` strings omit the UTF-16 terminator the flat `.acs` writes to disk (§7.2).
+const ACF_STRINGS: StringForm = StringForm::Utf16;
+
+/// Feature boundaries (Appendix A): above the first, an animation entry carries the id its
+/// `.aca` must echo back; above the second, the balloon block carries a second style byte.
+const VERSION_WITH_ANIM_IDS: u32 = 0x0001_001D;
+const VERSION_WITH_BALLOON_STYLE: u32 = 0x0001_001E;
 
 /// One animation reference: the animation's name and the external `.aca` file (relative
 /// path) that holds its frames/images/sounds.
@@ -45,14 +66,21 @@ impl AcfFile {
 
     /// Parse an in-memory `.acf` byte buffer.
     ///
-    /// **Temporarily stubbed.** The ACF header parser shared its byte-level readers with the
-    /// ACS parser, which is being reimplemented clean-room (see [`crate::acs`]); it currently
-    /// returns [`Error::Unsupported`] after validating the signature.
+    /// Accepts a flat `.acf` and an OLE2-packaged one, whose definition lives in a
+    /// `char.acf` stream framed the same way.
     pub fn parse(data: Vec<u8>) -> Result<AcfFile> {
         match crate::acs::signature(&data) {
-            Some(ACF_SIGNATURE) => Err(Error::Unsupported(
-                "the .acf header parser is being reimplemented clean-room and is not yet available",
-            )),
+            Some(ACF_SIGNATURE | ACF_SIGNATURE_ALT) => AcfFile::read(inflate(&data, 4)?),
+            Some(crate::acs_v15::OLE2_SIGNATURE) => {
+                let stream = crate::acs_v15::read_stream(&data, "char.acf")?;
+                let sig = crate::acs::signature(&stream);
+                if sig != Some(ACF_STREAM_SIGNATURE) {
+                    return Err(Error::BadSignature {
+                        found: sig.unwrap_or(0),
+                    });
+                }
+                AcfFile::read(inflate(&stream, 4)?)
+            }
             Some(found) => Err(Error::BadSignature { found }),
             None => Err(Error::UnexpectedEof {
                 context: "signature",
@@ -63,6 +91,74 @@ impl AcfFile {
         }
     }
 
+    /// Read the inflated character definition (§7.2). Its sub-blocks are the `.acs` ones in
+    /// a different order — the animation table comes first, and the localized name table
+    /// sits before the geometry rather than at the very end.
+    fn read(payload: Vec<u8>) -> Result<AcfFile> {
+        let mut c = Cursor::new(&payload);
+        let version_minor = c.u16()?;
+        let version_major = c.u16()?;
+        let version = ((version_major as u32) << 16) | version_minor as u32;
+        check_header_version(version)?;
+
+        let anim_count = c.u16()? as usize;
+        let mut animations = Vec::with_capacity(anim_count);
+        for _ in 0..anim_count {
+            animations.push(AcfAnimationRef {
+                name: c.text(ACF_STRINGS)?,
+                file_name: c.text(ACF_STRINGS)?,
+                return_name: c.text(ACF_STRINGS)?,
+                checksum: if version > VERSION_WITH_ANIM_IDS {
+                    c.u32()?
+                } else {
+                    0
+                },
+            });
+        }
+
+        let guid = c.guid()?;
+        let names = read_names(&mut c, ACF_STRINGS)?;
+        let width = c.u16()?;
+        let height = c.u16()?;
+        let transparency = c.u8()?;
+        let style = c.u32()?;
+        c.skip(4)?; // reserved; 0x00000002 in the flat .acs equivalent
+
+        let tts = (style & char_style::TTS != 0)
+            .then(|| read_tts(&mut c, ACF_STRINGS))
+            .transpose()?;
+        let balloon = (style & char_style::BALLOON != 0)
+            .then(|| read_balloon(&mut c, ACF_STRINGS, version > VERSION_WITH_BALLOON_STYLE))
+            .transpose()?;
+        let palette = read_palette(&mut c)?;
+        read_tray_icon(&mut c)?;
+        let states = read_states(&mut c, ACF_STRINGS)?;
+
+        Ok(AcfFile {
+            header: FileHeader {
+                version_major,
+                version_minor,
+                guid,
+                image_size: (width, height),
+                transparency,
+                style,
+                palette,
+            },
+            tts,
+            balloon,
+            names,
+            states,
+            animations,
+        })
+    }
+
+    /// Look up an animation reference by name (case-insensitive, as the engine does).
+    pub fn animation(&self, name: &str) -> Option<&AcfAnimationRef> {
+        self.animations
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+    }
+
     /// The default (US-English preferred, else first) character name.
     pub fn default_name(&self) -> Option<&Name> {
         self.names
@@ -70,6 +166,19 @@ impl AcfFile {
             .find(|n| n.language == 0x0409)
             .or_else(|| self.names.first())
     }
+}
+
+/// Unwrap the `{u32 uncompressedSize, u32 compressedSize, u8 data[]}` envelope that follows
+/// the signature of a character definition (§6.2/§7.1). A zero compressed size means the
+/// payload is stored as-is.
+fn inflate(data: &[u8], at: usize) -> Result<Vec<u8>> {
+    let mut c = Cursor::at(data, at);
+    let inflated_len = c.u32()? as usize;
+    let stored_len = c.u32()? as usize;
+    if stored_len == 0 {
+        return Ok(c.bytes(inflated_len)?.to_vec());
+    }
+    decode_data(c.bytes(stored_len)?, inflated_len)
 }
 
 #[cfg(test)]
@@ -88,7 +197,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ACF header parser stubbed during clean-room rewrite (see crate::acs)"]
     fn parses_synthetic_acf_header() {
         let mut payload = Vec::new();
         payload.extend_from_slice(&0u16.to_le_bytes()); // version minor

@@ -5,9 +5,24 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+/// Load `Merlin.acs` from `assets/agents`, wherever under it the file has been filed.
 fn merlin() -> Option<Agent> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/agents/Merlin.acs");
-    Agent::load(path).ok()
+    fn find(dir: &std::path::Path) -> Option<PathBuf> {
+        let mut sub = Vec::new();
+        for path in std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                sub.push(path);
+            } else if path
+                .file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Merlin.acs"))
+            {
+                return Some(path);
+            }
+        }
+        sub.iter().find_map(|d| find(d))
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/agents");
+    Agent::load(find(&root)?).ok()
 }
 
 /// A minimal in-memory character with SHOWING/HIDING/idle animations but **no** `MOVING*`
@@ -229,7 +244,6 @@ fn say_over_reveals_while_gesturing() {
 }
 
 #[test]
-#[ignore = "drives the runtime through the stubbed clean-room sequencer; re-enable after rewrite"]
 fn move_without_a_walk_animation_teleports() {
     let mut agent = teleporter();
     agent.show();
@@ -256,7 +270,6 @@ fn move_without_a_walk_animation_teleports() {
 }
 
 #[test]
-#[ignore = "drives the runtime through the stubbed clean-room sequencer; re-enable after rewrite"]
 fn play_looping_honors_the_built_in_loop_point() {
     use crustagent::format::{
         AcsFile, Animation, Branch, FileHeader, Frame, FrameImage, Guid, Name, ReturnKind, Rgba,
@@ -340,7 +353,6 @@ fn play_looping_honors_the_built_in_loop_point() {
 }
 
 #[test]
-#[ignore = "drives the runtime through the stubbed clean-room sequencer; re-enable after rewrite"]
 fn wait_holds_the_current_frame_instead_of_replaying() {
     use crustagent::format::{
         AcsFile, Animation, FileHeader, Frame, FrameImage, Guid, Name, ReturnKind, Rgba, State,

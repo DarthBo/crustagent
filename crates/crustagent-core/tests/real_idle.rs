@@ -11,22 +11,33 @@ fn assets_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("assets/agents"))
 }
 
+/// Every `.acs` under `assets/agents`, including in sub-directories (character libraries
+/// are often filed by format). Empty when the directory is absent.
+fn character_files() -> Vec<PathBuf> {
+    fn collect(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("acs"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(&assets_dir(), &mut files);
+    files.sort();
+    files
+}
+
 #[test]
 fn idle_picks_valid_animations_and_escalates() {
-    let dir = assets_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        eprintln!("no fixtures — skipping");
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("acs"))
-        {
-            continue;
-        }
+    for path in character_files() {
         let Ok(chr) = AcsFile::open(&path) else {
             continue;
         };

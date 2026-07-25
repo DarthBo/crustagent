@@ -11,30 +11,18 @@ Derivation and attribution
 ================================================================================
 
 crustagent is a from-scratch Rust implementation of the classic Microsoft Agent
-character system. Its file-format parsing and playback behavior were
-reverse-engineered from — and, for several algorithms, ported from — the source
-of:
+character system. Its byte-level file formats and playback rules were
+reverse-engineered from Microsoft's own runtime binaries (Char11.dll, AgentDp2.dll,
+AgentDpv.dll, AgentAnm.dll and the 1.5 DocFile provider), cross-checked against
+Microsoft's published Agent documentation, and confirmed by parsing sample
+character files. Those findings are written up in this repository as
+docs/acs-format.md (.acs / .acf / .aca) and docs/act-format.md (Microsoft Actor
+.act); the parsers, the image codec, the frame compositor and the animation
+sequencer are implemented from those documents.
 
-  DoubleAgent
-  Copyright (C) Cinnamon Software Inc.
-  https://sourceforge.net/projects/doubleagent/
-  Licensed GPL / LGPL.
-
-DoubleAgent is offered under the GPL or the LGPL; crustagent takes the LGPL
-option and is distributed under the GNU Lesser General Public License, version 3
-or later. Portions of the following modules in particular follow DoubleAgent's
-implementation closely and are best understood as ports of it:
-
-  - crustagent-format: the ACS 2.0 / ACS 1.5 readers, the LZ77 image
-    decompressor (CAgentFileBinary::DecodeData), and the frame compositor
-    (CAgentFile::GetFrameBits).
-  - crustagent-core: the animation sequence builder
-    (CAgentStreamInfo::SequenceAnimationFrames) and the speech-markup parser
-    (CAgentTextParse).
-
-Other parts — the embedding API and action queue (crustagent), the windowed
+Everything else — the embedding API and action queue (crustagent), the windowed
 renderer (crustagent-render), the text-to-speech and audio integration
-(crustagent-tts, crustagent-audio), and the GIF encoder (crustagent-gif) — are
+(crustagent-tts, crustagent-audio), and the GIF encoder (crustagent-gif) — is
 original to this project.
 
 ================================================================================

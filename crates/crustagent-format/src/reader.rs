@@ -6,6 +6,18 @@
 use crate::error::{Error, Result};
 use crate::model::{Color, Guid};
 
+/// How a block spells its length-prefixed strings. The count is always a `u32` count of
+/// *characters*, never bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StringForm {
+    /// UTF-16LE followed by an on-disk `0x0000` terminator — the flat `.acs` form.
+    Utf16Terminated,
+    /// UTF-16LE with no terminator on disk (`.acf`, and the ACS 1.5 character header).
+    Utf16,
+    /// One byte per character (the ACS 1.5 header's name/description/font strings).
+    Ansi,
+}
+
 /// A forward/seekable cursor over a byte slice.
 pub struct Cursor<'a> {
     buf: &'a [u8],
@@ -130,6 +142,21 @@ impl<'a> Cursor<'a> {
     /// Borrow `n` bytes and advance.
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         self.take(n, "bytes")
+    }
+
+    /// Read a length-prefixed string in the given [`StringForm`].
+    pub fn text(&mut self, form: StringForm) -> Result<String> {
+        match form {
+            StringForm::Utf16Terminated => self.string(true),
+            StringForm::Utf16 => self.string(false),
+            StringForm::Ansi => {
+                let char_len = self.u32()? as usize;
+                let bytes = self.take(char_len, "ansi string")?;
+                // The 1.5 header predates Unicode strings here; these are OEM/ANSI bytes,
+                // which for the Latin-1 range agree with the code points.
+                Ok(bytes.iter().map(|&b| b as char).collect())
+            }
+        }
     }
 
     /// Read a DWORD-length-prefixed UTF-16LE string.

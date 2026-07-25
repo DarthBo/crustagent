@@ -18,8 +18,8 @@
 //!
 //! ```
 //! use crustagent_core::{AnimationSequence, Player, SeqFrame};
-//! // A one-frame timeline. (The branch/graph *sequencer* — [`sequence_animation`] — is
-//! // being reimplemented clean-room, so build the [`AnimationSequence`] directly here.)
+//! // A one-frame timeline, built directly. (For a real character, [`sequence_animation`]
+//! // flattens an [`Animation`](crustagent_format::Animation)'s frame graph into one.)
 //! let seq = AnimationSequence {
 //!     frames: vec![SeqFrame { frame: 0, start_cs: 0, duration_cs: 10 }],
 //!     total_cs: 10,
@@ -45,7 +45,5 @@ pub use idle::IdleDirector;
 pub use motion::{Direction, MoveTo};
 pub use player::Player;
 pub use rng::{BranchRng, SplitMix64};
-pub use sequence::{
-    sequence_animation, sequence_exit, AnimationSequence, SeqFrame, MAX_LOOP_FRAMES, MAX_LOOP_TIME,
-};
+pub use sequence::{sequence_animation, sequence_exit, AnimationSequence, SeqFrame};
 pub use text::{parse_speech, ParsedSpeech, SpeechItem, Tag};

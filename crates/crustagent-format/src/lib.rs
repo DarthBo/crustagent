@@ -1,15 +1,17 @@
 //! # crustagent-format
 //!
 //! Parsers for Microsoft Agent character files (`.acs`, and later `.acf`/`.acd`). This
-//! crate is the pure, dependency-free format layer: it turns bytes into a [`model`] and
-//! decodes images/sounds. Runtime concerns (animation playback, rendering, speech) live
-//! in higher crates.
+//! crate is the format layer: it turns bytes into a [`model`] and decodes images/sounds.
+//! Runtime concerns (animation playback, rendering, speech) live in higher crates.
 //!
-//! The byte-level format was reverse-engineered from the original character files.
+//! The byte-level layouts are specified in [`docs/acs-format.md`](../../../docs/acs-format.md),
+//! reverse-engineered from Microsoft's own binaries.
 //!
 //! Currently implemented:
 //! - **ACS 2.0** ([`AcsFile`]) — the compiled binary format (full), incl. LZ77 image
 //!   decompression ([`decode::decode_data`]).
+//! - **ACS 1.5** — the OLE2 compound-document form of `.acs` (a compressed `char.acf`
+//!   definition plus one stream per animation), normalized into the same [`AcsFile`].
 //! - **ACF** ([`AcfFile`]) — the uncompiled format's *header* (metadata + animation
 //!   references to external `.aca` files); `.aca` frame/image loading is TODO.
 //! - **ACT** ([`ActFile`]) — the *Microsoft Actor* character table that preceded Agent
@@ -20,8 +22,7 @@
 //!   (same LZ77 as ACS); their decompressed pixel body and the classic-Mac artwork codec
 //!   aren't decoded to pixels yet.
 //!
-//! Planned: `.aca` bodies, ACS 1.5 (OLE2 compound document), ACD (text script), and the
-//! ACT bitmap-body/Mac artwork codecs.
+//! Planned: `.aca` bodies, ACD (text script), and the ACT bitmap-body/Mac artwork codecs.
 //!
 //! ```no_run
 //! use crustagent_format::AcsFile;

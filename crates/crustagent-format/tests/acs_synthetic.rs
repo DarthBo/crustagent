@@ -154,7 +154,6 @@ fn build_acs() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "ACS 2.0 byte parser stubbed during clean-room rewrite; build via from_parts instead"]
 fn parses_synthetic_acs() {
     let bytes = build_acs();
     let chr = AcsFile::parse(bytes).expect("parse");

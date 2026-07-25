@@ -8,19 +8,15 @@
 //! Timing is kept in the file's native base — **centiseconds** (1/100 s) — with
 //! [`AnimationSequence::total_ms`] for conversion.
 //!
-//! **Status: the branch/exit walk is temporarily stubbed.** The frame-graph traversal is
-//! being reimplemented clean-room from the Microsoft-binary-derived spec
-//! ([`docs/acs-format.md`](../../../docs/acs-format.md), §5) so the crate can be relicensed.
-//! Until then [`sequence_animation`] and [`sequence_exit`] return an empty
-//! [`AnimationSequence`]; the timeline types and helpers below are unaffected.
+//! The walk follows the playback rules in [`docs/acs-format.md`](../../../docs/acs-format.md)
+//! §5: a frame holds for its duration, then the next frame is the first branch whose
+//! cumulative percentage covers a single `1..=100` roll, or the next frame in order when no
+//! branch fires. Running off the end stops the animation. The engine expresses looping in
+//! data (a `100%` branch back to an earlier frame), so revisiting a frame is how this walk
+//! finds — and reports — the loop point instead of unrolling forever.
 
 use crate::rng::BranchRng;
-use crustagent_format::Animation;
-
-/// Runaway-loop guards.
-pub const MAX_LOOP_FRAMES: usize = 1000;
-/// In centiseconds (the duration base).
-pub const MAX_LOOP_TIME: u32 = 300_000;
+use crustagent_format::{Animation, Frame};
 
 /// One entry in a flattened sequence: which animation frame plays, when, for how long.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,7 +40,8 @@ pub struct AnimationSequence {
     /// loop returns to — i.e. where a looping player should seek on repeat. `None` for a
     /// finite (play-once) animation.
     pub loop_start_cs: Option<u32>,
-    /// True if the walk hit a runaway-loop guard ([`MAX_LOOP_FRAMES`]/[`MAX_LOOP_TIME`]).
+    /// True if the walk stopped on its defensive frame-count guard instead of reaching a
+    /// natural end (a loop point or the end of the graph). Well-formed data never trips it.
     pub truncated: bool,
 }
 
@@ -86,22 +83,122 @@ impl AnimationSequence {
 
 /// Build the playback sequence for `anim`, resolving branches with `rng`.
 ///
-/// **Temporarily stubbed** — returns an empty [`AnimationSequence`] while the frame-graph
-/// walk is reimplemented clean-room (see the module docs). Callers keep compiling; a stubbed
-/// character simply produces no timeline.
+/// Starts at frame 0 and follows branches until the walk runs off the end of the animation
+/// or returns to a frame it has already played — the latter is the loop point, reported as
+/// [`AnimationSequence::loop_start_cs`].
 pub fn sequence_animation(anim: &Animation, rng: &mut impl BranchRng) -> AnimationSequence {
-    let _ = (anim, rng);
-    AnimationSequence::default()
+    let mut walk = Walk::new(anim.frames.len());
+    let mut index = 0usize;
+    while let Some(frame) = anim.frames.get(index) {
+        if !walk.play(index, frame.duration) {
+            break;
+        }
+        index = branch_target(frame, rng).unwrap_or(index + 1);
+    }
+    walk.finish()
 }
 
 /// Build the deterministic *exit* sequence starting at `from_frame`, used for
 /// return-to-neutral when an animation ends or is interrupted.
 ///
-/// **Temporarily stubbed** — returns an empty [`AnimationSequence`] while the exit walk is
-/// reimplemented clean-room (see the module docs).
+/// Where the forward walk rolls the dice, this one follows each frame's `exit_frame` — the
+/// wind-down pose the author designated for an interrupted animation — and stops as soon as
+/// a frame declines to name a successor.
 pub fn sequence_exit(anim: &Animation, from_frame: usize) -> AnimationSequence {
-    let _ = (anim, from_frame);
-    AnimationSequence::default()
+    let mut walk = Walk::new(anim.frames.len());
+    let mut index = from_frame;
+    while let Some(frame) = anim.frames.get(index) {
+        if !walk.play(index, frame.duration) {
+            break;
+        }
+        match exit_target(frame, anim.frames.len()) {
+            Some(next) => index = next,
+            None => break,
+        }
+    }
+    walk.finish()
+}
+
+/// Resolve a frame's branch table against a single `1..=100` roll, cumulatively: the first
+/// branch whose probability covers the roll wins, and each miss consumes its share of the
+/// roll. `None` means no branch fired (the probabilities did not add up to 100, or the
+/// target is not a usable frame index) and the caller should advance in order.
+fn branch_target(frame: &Frame, rng: &mut impl BranchRng) -> Option<usize> {
+    if frame.branching.is_empty() {
+        return None;
+    }
+    let mut roll = rng.roll_1_100();
+    for branch in &frame.branching {
+        let share = branch.probability as u32;
+        if roll <= share {
+            return usize::try_from(branch.frame_ndx).ok();
+        }
+        roll -= share;
+    }
+    None
+}
+
+/// The frame an interrupted animation winds down to from `frame`, if it names one that is
+/// in range. The sentinels (`-1` "stop here", `-2` "nothing special") both end the walk:
+/// with no interrupt still pending there is nothing left to wind down.
+fn exit_target(frame: &Frame, frame_count: usize) -> Option<usize> {
+    usize::try_from(frame.exit_frame)
+        .ok()
+        .filter(|&next| next < frame_count)
+}
+
+/// Shared bookkeeping for both walks: remembers when each source frame was reached (so a
+/// revisit is recognised as the loop point), emits the frames that are actually on screen,
+/// and trips the runaway guards.
+struct Walk {
+    seq: AnimationSequence,
+    /// Time at which each source frame was first reached, or `None` if not yet played.
+    reached_cs: Vec<Option<u32>>,
+    steps: usize,
+}
+
+impl Walk {
+    fn new(frame_count: usize) -> Walk {
+        Walk {
+            seq: AnimationSequence::default(),
+            reached_cs: vec![None; frame_count],
+            steps: 0,
+        }
+    }
+
+    /// Play source frame `index`. Returns `false` when the walk must end here: either the
+    /// frame has been played before (its start time becomes the loop point) or a guard
+    /// tripped. Zero-duration frames are recorded but never emitted — they exist only to
+    /// route the graph.
+    fn play(&mut self, index: usize, duration_cs: u16) -> bool {
+        if let Some(start_cs) = self.reached_cs[index] {
+            self.seq.loop_start_cs = Some(start_cs);
+            return false;
+        }
+        // Defensive net only. The revisit check above already bounds the walk: each frame is
+        // played at most once (a repeat is the loop point, §5), so `steps` can never exceed the
+        // frame count regardless of which branches the RNG takes. Microsoft's engine keeps no
+        // runaway counter at all (acs-format.md §5.4); this cap is ours, derived from the data.
+        if self.steps >= self.reached_cs.len() {
+            self.seq.truncated = true;
+            return false;
+        }
+        self.steps += 1;
+        self.reached_cs[index] = Some(self.seq.total_cs);
+        if duration_cs > 0 {
+            self.seq.frames.push(SeqFrame {
+                frame: index,
+                start_cs: self.seq.total_cs,
+                duration_cs,
+            });
+            self.seq.total_cs += duration_cs as u32;
+        }
+        true
+    }
+
+    fn finish(self) -> AnimationSequence {
+        self.seq
+    }
 }
 
 #[cfg(test)]
@@ -138,7 +235,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn linear_animation_accumulates_time() {
         let a = anim(vec![frame(10, &[]), frame(20, &[]), frame(5, &[])]);
         let mut rng = SplitMix64::new(1);
@@ -176,7 +272,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn zero_duration_frames_are_traversed_not_emitted() {
         // frame 0 (dur 0) branches 100% to frame 1 (dur 10) which ends.
         let a = anim(vec![frame(0, &[(1, 100)]), frame(10, &[])]);
@@ -188,7 +283,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn deterministic_branch_selection() {
         // frame 0: 30% -> frame 2, 70% -> frame 1. Cumulative: roll<=30 => frame2.
         let a = anim(vec![
@@ -215,7 +309,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn detects_loop_and_reports_start() {
         // 0 -> 1 -> 2 -> back to 1 (100%). Loop starts at frame 1 (start_cs = 10).
         let a = anim(vec![frame(10, &[]), frame(20, &[]), frame(5, &[(1, 100)])]);
@@ -230,7 +323,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn loop_duration_derives_from_start() {
         let a = anim(vec![frame(10, &[]), frame(20, &[]), frame(5, &[(1, 100)])]);
         let mut rng = SplitMix64::new(1);
@@ -242,7 +334,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn exit_walk_follows_exit_frames() {
         // frame 0 exits to frame 2; frame 1 is skipped; frame 2 ends (exit -1).
         let mut f0 = frame(10, &[]);
@@ -262,7 +353,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn exit_walk_from_middle() {
         let mut f0 = frame(10, &[]);
         f0.exit_frame = -1;
@@ -278,7 +368,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sequencer walk stubbed during clean-room rewrite (see module docs)"]
     fn frame_at_cs_lookup() {
         let a = anim(vec![frame(10, &[]), frame(20, &[])]);
         let mut rng = SplitMix64::new(1);

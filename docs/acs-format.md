@@ -49,8 +49,10 @@ alone are tagged **(INFERRED)**.
 
   Cited: `AgentDp2.dll!FUN_74c55adc`/`FUN_74c55c3c` consume strings in place, advancing
   `charCount*2 + 2` bytes past the count field (the `+2` is the on-disk terminator). **In `.acf`
-  the terminator is *absent* on disk** — see §7. An empty string is `charCount==0` followed by the
-  `u16 0x0000`.
+  the terminator is *absent* on disk** — see §7. **An empty string is the 4-byte
+  `charCount == 0` and nothing else** — no terminator follows (byte-verified: reading it any
+  other way desynchronizes the Character Info walk, which otherwise lands exactly on
+  `charInfoOffset + charInfoSize` for every sample).
 - Error codes shown as `0x8004xxxx`/`0x8007xxxx` are the `HRESULT`s the loader returns; they are
   useful landmarks and are cited from the binary.
 
@@ -147,16 +149,25 @@ parser must walk them in order. Optional sub-blocks are gated by flag bits in th
 | Off  | Type  | Field | Notes |
 |------|-------|-------|-------|
 | 0x00 | u32   | `version` | see §Appendix A. Must be one of `0x1001C`, `0x1001E`, `0x1001F`, `0x20001`; `> 0x20001` → `0x80042203`, any other value → `0x80042202`. All 2.0 flat samples = `0x20001`. |
-| 0x04 | GUID  | `characterGuid` | 16 bytes; the character's unique class id (standard little-endian GUID field order). |
-| 0x14 | u8[8] | reserved | two dwords; purpose undetermined from the binary (INFERRED build/version stamp). |
+| 0x04 | u32   | `localeTableOffset` | **absolute file offset of the localized character-info table (§2.7)** — a direct pointer to the same table the sequential walk ends on. Byte-verified: on all 16 sampled flat characters this equals, exactly, the offset the walk reaches. |
+| 0x08 | u32   | `localeTableSize` | its byte length; `localeTableOffset + localeTableSize == charInfoOffset + charInfoSize`. |
+| 0x0C | GUID  | `characterGuid` | 16 bytes; the character's unique class id (standard little-endian GUID field order). |
 | 0x1C | u16   | `width` | default frame width, px |
 | 0x1E | u16   | `height` | default frame height, px |
 | 0x20 | u8    | `transparencyIndex` | **palette index used as the transparency color key** (confirmed: every image's background fill and border pixels equal this value). |
-| 0x21 | u8    | `flags1` | bit 5 (`0x20`) set ⇒ **Voice/TTS block present** (§2.2). |
-| 0x22 | u8    | `flags2` | bit 0 (`0x01`) **clear** ⇒ **Word-balloon block present** (§2.3). |
-| 0x23 | u8[6] | reserved/style | bytes at +0x23..+0x28; observed near-constant (`+0x25` = u16 `0x0002`). |
+| 0x21 | u32   | `styleFlags` | the same style word the 1.5 header stores as one dword (§6.2 field 10): bit `0x20` ⇒ **Voice/TTS block present** (§2.2), bit `0x200` ⇒ **Word-balloon block present** (§2.3). Observed: `0x110`, `0x120`, `0x210`, `0x220`, `0x10210`, `0x100220`, `0x110220`. |
+| 0x25 | u32   | reserved | `0x00000002` in every sample. |
 
 The variable area begins at block **+0x29**.
+
+*(Byte-level correction, verified against 16 flat characters:* the earlier reading of this
+header put the GUID at +0x04 and eight undetermined reserved bytes at +0x14. Both readings
+occupy the same 24 bytes, but the first dword pair is the locale-table pointer above — it
+matches the sequential walk's landing offset exactly in every sample — which places the GUID
+at **+0x0C**. Likewise `flags1`/`flags2` at +0x21/+0x22 are the low half of one style dword.
+On the balloon gate the two candidate rules — "`0x100` clear" and "`0x200` set" — agree on
+every sampled character; `0x200` is used here because it is the balloon bit the 1.5 header
+sets, and `0x100` its complement.*)
 
 `FUN_74c55c3c` also precomputes the frame raster size as `roundup4(width) * height` where
 `roundup4(x) = (x + 3) & ~3` (stored at runtime `this+0xE4`); this is the 8-bpp stride×height used
@@ -179,20 +190,23 @@ If `extraFlag != 0`, the following fields continue (offsets from +0x29):
 
 | Off  | Type  | Field | Notes |
 |------|-------|-------|-------|
-| +0x27 | u32   | `langId` | Windows LANGID (e.g. `0x00000409` en-US). |
-| +0x2B | u16   | `gender` | INFERRED (0 in samples). |
-| +0x2D | u16   | `age` | INFERRED (`0x0002` in samples). |
-| +0x2F | u16   | reserved | INFERRED (`0x001E` in samples). |
-| +0x31 | LPSTR | `voiceName` | speaker/voice display name (e.g. `"Business"`). |
+| +0x27 | u16   | `langId` | Windows LANGID (`0x0409` en-US in every sample). |
+| +0x29 | LPSTR | `languageName` | the language's display name, e.g. `"US English"`, `"American English"`, `"Standard"`. **Empty in every Microsoft character**, which is what made the tail look like a fixed 10-byte prefix. |
+| after | u16   | `gender` | INFERRED (`0x0002` in Microsoft's characters, `0x0001`/`0x0002` elsewhere). |
+| +2    | u16   | `age` | INFERRED (`0x001E` in every sample, Microsoft and third-party alike). |
+| +4    | LPSTR | `voiceName` | speaker/voice display name (e.g. `"Business"`, `"Normal"`). |
 
-The gate-path prefix (`langId` + three u16) is exactly **10 bytes** before the `voiceName` LPSTR;
-this is byte-confirmed (Robby/Genie). The split of those 10 bytes into `langId`/`gender`/`age`/
-reserved is INFERRED. In the `.acf` variant the same fields appear at object offsets +0x24…, see
-§7. *Third-party authoring note:* some non-Microsoft characters store `voiceName` as an **ANSI**
-(1-byte-per-char) string and use a different SAPI engine GUID; Microsoft's own characters use the
-UTF-16 `LPSTR` above.
+**Correction (byte-verified over ~340 characters):** this tail was previously read as a fixed
+`u32 langId` + three u16 before `voiceName`. That happens to consume the same 10 bytes when
+`languageName` is empty — true of every Microsoft character — but desynchronizes the whole
+Character Info walk on the ~30 third-party characters that fill it in. Reading `languageName` as
+a string is what makes those files parse to their exact block end.
 
-### 2.3 Word-balloon block (present iff `flags2 & 0x01 == 0`)
+In the `.acf` variant the same fields appear at object offsets +0x24…, see §7. *Third-party
+authoring note:* some non-Microsoft characters use a different SAPI engine GUID, and a few store
+their strings ANSI rather than as the UTF-16 `LPSTR` above.
+
+### 2.3 Word-balloon block (present iff `styleFlags & 0x200`)
 
 Source: the balloon walk in `FUN_74c55c3c` (and `.acf` `FUN_74c492a9`).
 
@@ -206,9 +220,10 @@ Source: the balloon walk in `FUN_74c55c3c` (and `.acf` `FUN_74c492a9`).
 | +0x0E | LPSTR| `fontName` | e.g. `"MS Sans Serif"`. |
 | after | i32  | `fontHeight` | Win32 `LOGFONT.lfHeight` (samples `-13`). |
 | +4    | u32  | `fontWeight` | `LOGFONT.lfWeight` (samples `400` = FW_NORMAL). |
-| +8    | u16  | reserved | `0x0000` (a trailing style byte pair; `.acf` reads an extra flag byte for version > 0x1001E). |
+| +8    | u8   | `italic` | `LOGFONT.lfItalic` (INFERRED; `0` in samples). |
+| +9    | u8   | `strikeOut` | `LOGFONT.lfStrikeOut` (INFERRED; `0` in samples). In the split/1.5 header this second byte is the one gated on version > `0x1001E`. |
 
-(The trailing metrics block is 10 bytes total: `i32 fontHeight, u32 fontWeight, u16 0`.)
+(The trailing metrics block is 10 bytes total: `i32 fontHeight, u32 fontWeight, u8, u8`.)
 
 ### 2.4 Palette
 
@@ -672,7 +687,10 @@ marker to §4.1, with a 6-byte `0xFF` trailer.) A loose/on-disk sibling path use
 
 **Strings in 1.5 have no on-disk terminator**: `{ u32 charCount; u16 chars[charCount] }`
 (UTF-16LE), or an ANSI variant `{ u32 charCount; char chars[charCount] }` for name/description.
-(`FUN_67f9a278`/`FUN_67f9a2ed`.)
+(`FUN_67f9a278`/`FUN_67f9a2ed`.) Which of the two the name/description/extraData fields use is
+**not** recorded in the header, and it varies: Microsoft's own `genie`/`robby` write them ANSI,
+while both third-party 1.5 samples here write them UTF-16. A reader can settle it by trying
+both — only the correct one consumes the definition exactly.
 
 Decompressed header (`FUN_67f9693c`), in order — all byte-verified:
 
@@ -695,10 +713,11 @@ Decompressed header (`FUN_67f9693c`), in order — all byte-verified:
 | 15 | State→animation map | `FUN_67f96dba` | `u16 stateCount`, per state `{ wLPSTR name; u16 count; wLPSTR animName[count] }` |
 
 Differences from the 2.0 flat header:
-- **Balloon-present bit is `styleFlags & 0x100`** (2.0 uses `flags2 & 0x01`); voice bit is
-  `styleFlags & 0x20` in both.
-- `name`/`description`/`extraData` are **top-level ANSI strings** here, versus the per-LCID
-  UTF-16 localized table of the 2.0 header (§2.7).
+- The balloon gate is the same style word in both (§2.1): the block is present when
+  `styleFlags & 0x200` is set / `styleFlags & 0x100` is clear — the two are complementary in
+  every sample. The voice bit is `styleFlags & 0x20` in both.
+- `name`/`description`/`extraData` are **top-level single strings** here (ANSI or UTF-16, see
+  above), versus the per-LCID UTF-16 localized table of the 2.0 header (§2.7).
 - **No tray-icon block** (the header consumes the whole decompressed buffer with none).
 - **No palette `0`→`256` sentinel** and **no pitch→gender heuristic** in the 1.5 loader (gender is
   resolved by the TTS engine from the mode GUID). *(These two behaviors, hypothesized for 1.5, are
@@ -719,20 +738,48 @@ u32  compressedSize
 u8   data[compressedSize]
 ```
 
-Decompressed animation record (`FUN_67f95822`), byte-verified on genie `anim1` (RestPose):
+Decompressed animation record (`FUN_67f95822`). Unlike 2.0, an animation is self-contained:
+it carries its own audio and artwork, and its frames index those local tables.
 
 ```
-u16  sharedImageCount
-{ u32 size; u8 bytes[size] } sharedImages[sharedImageCount]   ; shared 8-bpp images
+u16  soundCount
+{ u32 size; u8 riff[size] } sounds[soundCount]         ; complete RIFF/WAVE files
+
+u16  imageCount
+imageCount × Image:
+    u32  size                    ; 0 => empty slot, the record ends here
+    u8   storage                 ; 0 = raw 8-bpp in every sample
+    u8   pixels[size]            ; full character frame; stride roundup4(width), bottom-up
+    u32  regionSize
+    u8   region[regionSize]      ; RGNDATA, as in §3.3.1
+
 u16  frameCount
-Frame frames[frameCount]
+frameCount × Frame:
+    u16  imageIndex              ; into this stream's image table
+    i16  soundIndex              ; into this stream's sound table; -1 = none
+    u16  duration                ; CENTISECONDS
+    i16  x                       ; image placement (0 in every sample)
+    i16  y
+    u8   branchCount
+    { i16 targetFrame; u16 probability } branches[branchCount]     ; percent, as §5.2
+    u8   mouthOverlayCount
+    mouthOverlayCount × MouthOverlay:                              ; inline lip-sync art
+        u8   mouthState          ; 0..6, as §3.2.4
+        u32  size                ; 0 => empty slot, the record ends here (as in the image table)
+        u8   storage             ; 0 = raw, as above
+        i16  x; i16 y            ; placement within the frame
+        u16  width; u16 height   ; size == roundup4(width) * height
+        u8   pixels[size]
 ```
 
-Each frame begins with `u32 imageSize` then `imageSize` bytes of an 8-bpp palette-indexed bitmap
-(indices into the single `char.acf` palette; background = `transparencyIndex`), followed by the
-frame's timing/branch/overlay/sound metadata (the 1.x frame model, cf. §5.6). There is no
-per-stream palette. (genie `anim1`: `sharedImageCount = 0`, `frameCount = 1`, frame image =
-`0x4000` = 128×128 bytes, background index `0x0A`.)
+Byte-verified end-to-end: this grammar consumes **795 of the 802 animation streams** across the
+30 sampled 1.5 characters exactly to their declared decompressed length, and their rasters
+render correctly against the `char.acf` palette. There is no per-stream palette, and no
+`exitFrame` field — 1.5 frames wind down only through their branch lists.
+
+The seven exceptions are all damage rather than structure: six streams' LZ payloads decode a
+handful of bytes short of the declared size, so a robust reader should keep the frames it did
+parse rather than reject the animation.
 
 ---
 
@@ -906,12 +953,15 @@ enumeration is the authoritative source for those action ids and is not reproduc
   byte and its trailing two u16 offsets (all `0`); the tray-icon two chunks being color-DIB +
   AND-mask; the exact split of the voice block's language/gender/age u16 sub-fields; the `.acf`
   `swprintf` path format; the field *meanings* inside `.aca` `FUN_74c47c5a` frames.
-- **CharInfo `+0x14` reserved 8 bytes**: present in every sample but not read by the parse path;
-  purpose undetermined from the binary.
-- **Clean-room note.** No third-party parser (including "DoubleAgent") was consulted for any part of
-  this document; every structural claim traces to a cited Microsoft binary function or a Microsoft
-  public API fact, and byte-level details were confirmed by decompressing/parsing the sample files
-  listed in *Provenance*.
+- **Revisions from implementation.** Writing a reader against this document and running it over
+  ~340 characters corrected five byte-level readings, each noted inline where it applies: the
+  Character Info pointer/GUID split (§2.1), the empty-string encoding (§Conventions), the voice
+  block's `languageName` string (§2.2), the balloon block's trailing `LOGFONT` flags (§2.3), and
+  the 1.5 animation-stream grammar and identity-string encoding (§6.2/§6.3).
+- **Clean-room note.** No third-party reimplementation of these formats was consulted for any part
+  of this document; every structural claim traces to a cited Microsoft binary function or a
+  Microsoft public API fact, and byte-level details were confirmed by decompressing/parsing the
+  sample files listed in *Provenance*.
 
 ## Appendix E — Reference parse order (flat `.acs`)
 
@@ -919,9 +969,10 @@ enumeration is the authoritative source for those action ids and is not reproduc
 read 36-byte file header; check magic 0xABCDABC3
 resolve 4 directories (CharInfo, AnimDir, ImageDir, SoundDir) by (offset,size)
 parse CharInfo:
-    version, characterGuid, width, height, transparencyIndex, flags1, flags2
-    if flags1 & 0x20:        parse Voice/TTS block
-    if (flags2 & 0x01) == 0: parse Word-balloon block
+    version, localeTable(offset,size), characterGuid, width, height,
+        transparencyIndex, styleFlags, reserved
+    if styleFlags & 0x20:    parse Voice/TTS block
+    if styleFlags & 0x200:   parse Word-balloon block
     parse Palette (u32 count + RGBQUAD[count])
     parse Tray icon (u8 present + optional two chunks)
     parse State->animation map (u16 count + entries)
@@ -962,23 +1013,25 @@ Every image in every character LZ-decodes to precisely `roundup4(width)*height` 
 structure lands exactly on its declared boundary — confirming the container, the full Character
 Info grammar, the frame/overlay/branch/mouth records, and the codec.
 
-### F.2 Third-party corpus (~300 community characters)
+### F.2 Third-party corpus (~340 community characters)
 
-A robustness sweep over ~300 downloaded community characters plus the 1.5 set:
+A robustness sweep over a mixed library of 359 `.acs` files — Microsoft's shipping characters plus
+~340 community ones, in both container generations:
 
 | Outcome | Count | Meaning |
 |---------|-------|---------|
-| **Flat `.acs`, parsed byte-exact** | **296 / 296** | every valid flat file consumes exactly to each structure's declared size |
-| OLE2 1.5 (`.acs`) | 34 | the structured-storage form of §6 (parsed by that path) |
+| **Flat `.acs` (§1–§5), parsed** | **309 / 325** | consumes exactly to each structure's declared size; every image LZ-decodes to `roundup4(width)*height` |
+| **OLE2 1.5 (§6), parsed** | **34 / 34** | the structured-storage form, 795 of its 802 animation streams consumed exactly (the other 7 are damaged payloads) |
 | Corrupt / non-conformant | 16 | garbage version dword + garbage directory counts; rejected (see F.3) |
 
-Feature aggregates over the 296 valid flat files:
+Feature aggregates over the valid flat files:
 
-- **`version` is `0x20001` in all 296** — the flat single-file form is uniformly 2.0.
+- **`version` is `0x20001` in all of them** — the flat single-file form is uniformly 2.0.
 - **Maximum `branchCount` observed across the whole corpus is 3** (the field is a `u8` allowing up
   to 255; real characters use very short branch lists). §3.2.2.
-- Exit-frame branches used in 117/296; per-frame mouth overlays (lip-sync) used in 225/296.
-- No structural deviations from §1–§4 in any of the 296.
+- Roughly a third use exit-frame branches; most use per-frame mouth overlays (lip-sync).
+- No structural deviations from §1–§4 in any of them — the only variability is inside the voice
+  block's tail (§2.2) and in outright damage (F.3).
 
 ### F.3 Quirks & robustness notes
 
@@ -997,10 +1050,9 @@ tolerate without abandoning the canonical layout above:
   terminator from the zero-filled tail of the last mapped page. Robust readers should not fail hard
   on a 2-byte shortfall at the very end of the Character Info block.
 - **Non-Microsoft voice blocks.** A minority of third-party characters use a different SAPI engine
-  GUID and encode the voice sub-fields past the two GUIDs differently — including an **ANSI**
-  (1-byte-per-char) `voiceName` rather than the UTF-16 `LPSTR` of §2.2. The block is still gated by
-  `flags1 & 0x20`; only its internal tail varies. Microsoft's own characters always use the UTF-16
-  form specified in §2.2.
+  GUID and fill in the `languageName` string that Microsoft's characters leave empty (§2.2) — the
+  single most common reason a reader written against Microsoft's samples alone falls over on
+  community characters. The block is still gated by the same style bit; only its tail varies.
 - **General guidance.** Always walk the container by the header's `(offset,size)` fields rather than
   assuming block adjacency; treat directory counts and the `version` dword as trust gates; and read
   images by their per-record `compressedSize`/raster size rather than scanning.
