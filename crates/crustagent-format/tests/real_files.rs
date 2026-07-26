@@ -8,7 +8,7 @@
 //! decode to its exact expected size — the strongest end-to-end check of the ACS parser
 //! and the LZ77 decompressor.
 
-use crustagent_format::AcsFile;
+use crustagent_format::{AcsFile, Gender};
 use std::path::PathBuf;
 
 fn assets_dir() -> PathBuf {
@@ -119,4 +119,41 @@ fn parses_bundled_characters() {
     }
 
     eprintln!("checked {checked} character file(s)");
+}
+
+/// The gender a character declares and the gender implied by the voice it selected must
+/// never disagree. Verified across the ~340-character library: of the 251 files that
+/// declare a gender, all 251 agree with their voice id's selector byte — which is what
+/// makes `Tts::voice_gender` a safe fallback for the ~29 that declare none.
+#[test]
+fn declared_gender_agrees_with_voice_id() {
+    let files = character_files();
+    if files.is_empty() {
+        eprintln!("no fixtures under {} — skipping", assets_dir().display());
+        return;
+    }
+
+    let (mut declared, mut inferred_only) = (0usize, 0usize);
+    for path in files {
+        let Ok(chr) = AcsFile::open(&path) else {
+            continue; // unsupported variant; parses_bundled_characters reports it
+        };
+        let Some(tts) = &chr.tts else { continue };
+        match (tts.declared_gender(), tts.voice_gender()) {
+            (Gender::Unspecified, Gender::Unspecified) => {}
+            (Gender::Unspecified, _) => inferred_only += 1,
+            (d, v) => {
+                declared += 1;
+                assert!(
+                    v == Gender::Unspecified || v == d,
+                    "{}: declares {d:?} but its voice id {} implies {v:?}",
+                    path.display(),
+                    tts.mode
+                );
+                assert_eq!(tts.resolved_gender(), d, "{}", path.display());
+            }
+        }
+    }
+
+    eprintln!("{declared} characters declare a gender, {inferred_only} infer one from their voice");
 }

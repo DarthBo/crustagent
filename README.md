@@ -91,6 +91,13 @@ AVSpeech, speech-dispatcher). Engines emit a `VoiceEvent` stream (word boundarie
 balloon reveal, visemes → mouth) that the `Agent` consumes each tick. (Linux needs
 `speech-dispatcher` installed for audio; it degrades to silent otherwise.)
 
+The character's original SAPI 4 voice no longer exists on any modern system, but its
+*gender* and language survive in the file, so `set_tts` points the engine at a matching
+system voice — a male character doesn't get the OS's (usually female) default. Characters
+that don't state a gender have it inferred from the voice id they selected
+(`Tts::resolved_gender`); `cargo run -p crustagent-tts --example voices -- assets/agents/ACS`
+prints what each one will sound like.
+
 Planned: a viseme-accurate/offline TTS backend (e.g. Piper) for true lip-sync, `.aca`
 bodies for ACF, and a host-defined command API for the menu.
 

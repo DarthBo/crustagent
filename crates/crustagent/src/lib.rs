@@ -42,8 +42,8 @@ const AUTO_HIDE_MS: u32 = 3000;
 /// Per-word reveal pacing for a silent `Think` balloon (ms).
 const THINK_PACE_MS: u32 = 300;
 
-pub use crustagent_format::{self as format, AcsFile as CharacterFile, MouthOverlay, Rgba};
-pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent};
+pub use crustagent_format::{self as format, AcsFile as CharacterFile, Gender, MouthOverlay, Rgba};
+pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent, VoiceRequest};
 
 /// A high-level request enqueued on the [`Agent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -353,8 +353,22 @@ impl Agent {
 
     /// Swap the text-to-speech engine (default is the silent [`TimedTts`]). Use
     /// [`default_engine`] for real audio where a backend exists.
-    pub fn set_tts(&mut self, engine: Box<dyn TtsEngine>) {
+    ///
+    /// The engine is immediately pointed at the character's [`voice`](Agent::voice), so a
+    /// male character doesn't speak in the system's (often female) default voice.
+    pub fn set_tts(&mut self, mut engine: Box<dyn TtsEngine>) {
+        engine.set_voice(self.voice());
         self.tts = engine;
+    }
+
+    /// The voice this character asks for — gender and language from its TTS block, with
+    /// the gender inferred from the selected voice id when the file doesn't state one.
+    pub fn voice(&self) -> VoiceRequest {
+        self.file
+            .tts
+            .as_ref()
+            .map(VoiceRequest::from_tts)
+            .unwrap_or_default()
     }
 
     /// Set the sound-effect audio sink (default is silent [`NullSink`]).

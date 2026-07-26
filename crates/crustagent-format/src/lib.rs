@@ -49,5 +49,5 @@ pub use act::{ActFile, Cel, CelFormat};
 pub use error::{Error, Result};
 pub use model::{
     char_style, Animation, Balloon, Branch, Color, FileHeader, Frame, FrameImage, FrameOverlay,
-    Guid, Image, Indexed, MouthOverlay, Name, ReturnKind, Rgba, State, Tts,
+    Gender, Guid, Image, Indexed, MouthOverlay, Name, ReturnKind, Rgba, State, Tts,
 };

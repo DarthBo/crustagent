@@ -107,6 +107,36 @@ pub struct FileHeader {
     pub palette: Vec<Color>,
 }
 
+/// The gender of a character's speaking voice.
+///
+/// SAPI 4 records this numerically in the voice block (`1` female, `2` male); `0` there
+/// means the extended block is absent rather than "neutral", so both cases map to
+/// [`Gender::Unspecified`] — see [`Tts::declared_gender`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Gender {
+    /// The file says nothing about the voice's gender.
+    #[default]
+    Unspecified,
+    Female,
+    Male,
+}
+
+/// Voice-mode ids that only differ in a trailing selector byte, which picks the speaker.
+///
+/// Verified over ~340 characters: for both engines, selector `0x00..=0x07` is one of the
+/// adult male voices and `0x08..=0x09` one of the adult female voices, agreeing with the
+/// declared [`Tts::gender`] in every file that declares one.
+const VOICE_FAMILIES: [[u8; 15]; 2] = [
+    // {CA141FD0-AC7F-11D1-97A3-006008273000} — Microsoft TruVoice (`mslwvtts.dll`).
+    [
+        0xD0, 0x1F, 0x14, 0xCA, 0x7F, 0xAC, 0xD1, 0x11, 0x97, 0xA3, 0x00, 0x60, 0x08, 0x27, 0x30,
+    ],
+    // {1B6BF831-9299-101B-8A19-265D428C6000} — the older Agent 1.5-era voices.
+    [
+        0x31, 0xF8, 0x6B, 0x1B, 0x99, 0x92, 0x1B, 0x10, 0x8A, 0x19, 0x26, 0x5D, 0x42, 0x8C, 0x60,
+    ],
+];
+
 /// The character's default text-to-speech voice.
 #[derive(Clone, Debug)]
 pub struct Tts {
@@ -119,6 +149,42 @@ pub struct Tts {
     pub gender: u16,
     pub age: u16,
     pub style: String,
+}
+
+impl Tts {
+    /// The gender the file states outright, from the extended voice block.
+    ///
+    /// [`Gender::Unspecified`] when that block is absent — roughly one character in twelve.
+    pub fn declared_gender(&self) -> Gender {
+        match self.gender {
+            1 => Gender::Female,
+            2 => Gender::Male,
+            _ => Gender::Unspecified,
+        }
+    }
+
+    /// The gender implied by the voice the character selected, for the two engine families
+    /// whose mode ids we recognize (see [`VOICE_FAMILIES`]).
+    pub fn voice_gender(&self) -> Gender {
+        let bytes = &self.mode.0;
+        if !VOICE_FAMILIES.iter().any(|f| f == &bytes[..15]) {
+            return Gender::Unspecified;
+        }
+        match bytes[15] {
+            0x00..=0x07 => Gender::Male,
+            0x08..=0x09 => Gender::Female,
+            _ => Gender::Unspecified,
+        }
+    }
+
+    /// The best gender available: what the file declares, falling back to what its chosen
+    /// voice implies. Use this to pick a system voice.
+    pub fn resolved_gender(&self) -> Gender {
+        match self.declared_gender() {
+            Gender::Unspecified => self.voice_gender(),
+            declared => declared,
+        }
+    }
 }
 
 /// Default word-balloon appearance.
@@ -352,5 +418,59 @@ impl Image {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A TruVoice voice mode id with `selector` as its trailing voice-selector byte.
+    fn truvoice(selector: u8) -> Guid {
+        let mut bytes = [0u8; 16];
+        bytes[..15].copy_from_slice(&VOICE_FAMILIES[0]);
+        bytes[15] = selector;
+        Guid(bytes)
+    }
+
+    fn tts(mode: Guid, gender: u16) -> Tts {
+        Tts {
+            engine: Guid::NIL,
+            mode,
+            speed: -1,
+            pitch: -1,
+            language: Some(0x0409),
+            gender,
+            age: 30,
+            style: String::new(),
+        }
+    }
+
+    #[test]
+    fn declared_gender_follows_sapi_numbering() {
+        assert_eq!(tts(Guid::NIL, 1).declared_gender(), Gender::Female);
+        assert_eq!(tts(Guid::NIL, 2).declared_gender(), Gender::Male);
+        // 0 is "the extended block is absent", not GENDER_NEUTRAL.
+        assert_eq!(tts(Guid::NIL, 0).declared_gender(), Gender::Unspecified);
+    }
+
+    #[test]
+    fn voice_selector_byte_implies_gender() {
+        assert_eq!(tts(truvoice(0x00), 0).voice_gender(), Gender::Male);
+        assert_eq!(tts(truvoice(0x07), 0).voice_gender(), Gender::Male);
+        assert_eq!(tts(truvoice(0x08), 0).voice_gender(), Gender::Female);
+        assert_eq!(tts(truvoice(0x09), 0).voice_gender(), Gender::Female);
+        // Outside the known voice list, and outside the known engines.
+        assert_eq!(tts(truvoice(0x42), 0).voice_gender(), Gender::Unspecified);
+        assert_eq!(tts(Guid::NIL, 0).voice_gender(), Gender::Unspecified);
+    }
+
+    #[test]
+    fn resolved_gender_prefers_the_declared_value() {
+        // Declared wins even where a voice id is recognized...
+        assert_eq!(tts(truvoice(0x08), 1).resolved_gender(), Gender::Female);
+        // ...and the voice id fills in for the files that declare nothing.
+        assert_eq!(tts(truvoice(0x00), 0).resolved_gender(), Gender::Male);
+        assert_eq!(tts(Guid::NIL, 0).resolved_gender(), Gender::Unspecified);
     }
 }

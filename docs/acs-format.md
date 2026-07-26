@@ -192,7 +192,7 @@ If `extraFlag != 0`, the following fields continue (offsets from +0x29):
 |------|-------|-------|-------|
 | +0x27 | u16   | `langId` | Windows LANGID (`0x0409` en-US in every sample). |
 | +0x29 | LPSTR | `languageName` | the language's display name, e.g. `"US English"`, `"American English"`, `"Standard"`. **Empty in every Microsoft character**, which is what made the tail look like a fixed 10-byte prefix. |
-| after | u16   | `gender` | INFERRED (`0x0002` in Microsoft's characters, `0x0001`/`0x0002` elsewhere). |
+| after | u16   | `gender` | SAPI 4 `GENDER_FEMALE` = `0x0001`, `GENDER_MALE` = `0x0002` (`0x0002` in every Microsoft character); see the voice-selector note below. |
 | +2    | u16   | `age` | INFERRED (`0x001E` in every sample, Microsoft and third-party alike). |
 | +4    | LPSTR | `voiceName` | speaker/voice display name (e.g. `"Business"`, `"Normal"`). |
 
@@ -201,6 +201,21 @@ If `extraFlag != 0`, the following fields continue (offsets from +0x29):
 `languageName` is empty — true of every Microsoft character — but desynchronizes the whole
 Character Info walk on the ~30 third-party characters that fill it in. Reading `languageName` as
 a string is what makes those files parse to their exact block end.
+
+**The mode id's trailing byte is the voice selector** (verified over the same ~340 characters).
+Both engine families below differ only in their last byte, and it maps to a gender: `0x00…0x07`
+are the adult male voices, `0x08`/`0x09` the adult female ones.
+
+| Mode id | Engine |
+|---------|--------|
+| `{CA141FD0-AC7F-11D1-97A3-0060082730xx}` | Microsoft TruVoice (`mslwvtts.dll`) |
+| `{1B6BF831-9299-101B-8A19-265D428C60xx}` | the older Agent 1.5-era voices |
+
+Of the 251 library characters that declare a `gender`, **all 251 agree with their selector byte**,
+which makes the byte a sound fallback for the ~29 that carry a voice block with no extended tail
+(`extraFlag == 0`, so no `gender` at all). `Tts::resolved_gender()` implements exactly that, and
+`crustagent-tts` uses it to pick a same-gender system voice instead of leaving every character on
+the OS default. There is no way to recover the *specific* voice: those SAPI 4 engines are gone.
 
 In the `.acf` variant the same fields appear at object offsets +0x24…, see §7. *Third-party
 authoring note:* some non-Microsoft characters use a different SAPI engine GUID, and a few store
