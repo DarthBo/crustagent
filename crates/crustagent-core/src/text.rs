@@ -151,7 +151,10 @@ enum Markup {
     Tag(Tag),
     /// `\Map="spoken"="balloon"\` (§2): speak one thing, display another. The spoken text is
     /// the first parameter, as in Microsoft's own example `\map="Spoken text"="Balloon text"\`.
-    Map { spoken: String, balloon: String },
+    Map {
+        spoken: String,
+        balloon: String,
+    },
 }
 
 /// Walk `input`, accumulating words into `out` and interpreting tags as they appear.

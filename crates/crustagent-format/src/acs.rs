@@ -963,10 +963,7 @@ mod tests {
         // The later entry is the base; the earlier one draws over it, and its key pixels let
         // the base show through.
         let file = character(
-            vec![
-                image(0, &[&[3, 0], &[0, 3]]),
-                image(1, &[&[1, 1], &[1, 1]]),
-            ],
+            vec![image(0, &[&[3, 0], &[0, 3]]), image(1, &[&[1, 1], &[1, 1]])],
             frame(vec![layer(0, (0, 0)), layer(1, (0, 0))], Vec::new()),
         );
         let composed = file
