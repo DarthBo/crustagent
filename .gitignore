@@ -1,6 +1,5 @@
 /target
 **/*.rs.bk
-Cargo.lock
 .DS_Store
 
 # Character assets are third-party (Microsoft / original authors). We don't have
