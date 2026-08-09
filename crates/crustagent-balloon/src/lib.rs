@@ -198,6 +198,13 @@ impl Font {
         s.chars().map(|c| self.advance_of(c)).sum::<f32>().ceil() as i32
     }
 
+    /// Sum of advances over the first `n` chars — exactly the pen offset [`Canvas::text_font`]
+    /// will have reached there, **unrounded**. [`measure`](Font::measure) ceils its total,
+    /// which is right for sizing a box and wrong for placing anything *inside* one.
+    fn advance_prefix(&self, s: &str, n: usize) -> f32 {
+        s.chars().take(n).map(|c| self.advance_of(c)).sum()
+    }
+
     /// Whether the text face has a real glyph for `c` (index 0 = missing → try emoji).
     fn has_text_glyph(&self, c: char) -> bool {
         self.face.lookup_glyph_index(c) != 0
@@ -459,6 +466,23 @@ fn measure_text(font: Option<&Font>, s: &str) -> i32 {
         Some(f) => f.measure(s),
         None => s.chars().count() as i32 * 8 * BSCALE,
     }
+}
+
+/// The pen offset at char `n` of `s`, unrounded — the same accumulation the glyph drawing
+/// does. Anything that has to line up *with the glyphs* (a caret, a selection edge, a
+/// hit-test boundary) must come from here rather than from summed [`measure_text`] calls:
+/// those ceil each total, so the error changes as the boundary moves and the text appears to
+/// shift under it.
+fn pen_offset(font: Option<&Font>, s: &str, n: usize) -> f32 {
+    match font {
+        Some(f) => f.advance_prefix(s, n),
+        None => (n.min(s.chars().count()) as i32 * 8 * BSCALE) as f32,
+    }
+}
+
+/// The pen offset at char `n`, as a pixel column measured from `x`.
+fn pen_x(font: Option<&Font>, x: i32, s: &str, n: usize) -> i32 {
+    (x as f32 + pen_offset(font, s, n)).round() as i32
 }
 
 /// One row's box, relative to the content origin.
@@ -761,8 +785,7 @@ fn input_scroll(view: &InputView, fonts: &AskFonts, inner_w: i32) -> i32 {
     if full <= inner_w {
         return 0;
     }
-    let upto: String = view.value.chars().take(view.caret).collect();
-    let caret_x = measure_text(fonts.text, &upto);
+    let caret_x = pen_offset(fonts.text, &view.value, view.caret).round() as i32;
     // Keep the caret inside the box, and never scroll past the end of the text.
     caret_x.saturating_sub(inner_w).max(0).min(full - inner_w)
 }
@@ -794,14 +817,12 @@ pub fn ask_caret_at(
         return Some(0);
     }
     let (text_x, _) = input_text_origin(view, fonts, field.x, field.w, scale);
-    // Walk the chars, taking the boundary nearest the click.
+    // Walk the char boundaries — from the same pen the glyphs use — and take the nearest.
     let mut best = (0usize, (px - text_x).abs());
-    let mut run = String::new();
-    for (n, c) in view.value.chars().enumerate() {
-        run.push(c);
-        let dist = (px - (text_x + measure_text(fonts.text, &run))).abs();
+    for n in 1..=view.value.chars().count() {
+        let dist = (px - pen_x(fonts.text, text_x, &view.value, n)).abs();
         if dist < best.1 {
-            best = (n + 1, dist);
+            best = (n, dist);
         }
     }
     Some(best.0)
@@ -987,9 +1008,24 @@ impl Canvas<'_> {
 
     /// Draw `s` with a real font, its top edge at `top`, left edge at `x`.
     fn text_font(&mut self, font: &Font, x: i32, top: i32, s: &str, rgb: [u8; 3]) {
+        self.text_font_with(font, x, top, s, |_| rgb);
+    }
+
+    /// Draw `s` with a real font, taking each char's colour from `color_of`. The pen runs
+    /// once across the whole string, so a glyph lands in the same place whatever colour it
+    /// is given — which is what keeps text from shifting as a selection grows or shrinks.
+    fn text_font_with(
+        &mut self,
+        font: &Font,
+        x: i32,
+        top: i32,
+        s: &str,
+        color_of: impl Fn(usize) -> [u8; 3],
+    ) {
         let baseline = top + font.ascent.round() as i32;
         let mut pen = x as f32;
-        for c in s.chars() {
+        for (i, c) in s.chars().enumerate() {
+            let rgb = color_of(i);
             // Colour emoji (and any codepoint the text face lacks) come from the emoji face,
             // rasterized as RGBA and composited straight.
             if !font.has_text_glyph(c) {
@@ -1019,6 +1055,21 @@ impl Canvas<'_> {
                 }
             }
             pen += m.advance_width;
+        }
+    }
+
+    fn text_bitmap_with(
+        &mut self,
+        x: i32,
+        y: i32,
+        scale: i32,
+        s: &str,
+        color_of: impl Fn(usize) -> [u8; 3],
+    ) {
+        let mut cx = x;
+        for (i, ch) in s.chars().enumerate() {
+            self.glyph(cx, y, scale, ch, color_of(i));
+            cx += 8 * scale;
         }
     }
 
@@ -1358,46 +1409,35 @@ impl Canvas<'_> {
         let inner = (x + hpad, y + bord, inner_w, h - 2 * bord);
         // Everything inside the box is clipped: a scrolled value must be cut at the edge
         // rather than spill across the balloon.
-        let run_x = |n: usize| {
-            let upto: String = view.value.chars().take(n).collect();
-            text_x + measure_text(fonts.text, &upto)
-        };
+        let selection = view.selection.filter(|_| !prompting);
 
-        match view.selection.filter(|_| !prompting) {
-            // Selected text is drawn in three runs so the middle can be inverted.
-            Some((lo, hi)) => {
-                let (sel_x, sel_end) = (run_x(lo), run_x(hi));
-                let take = |a: usize, b: usize| -> String {
-                    view.value.chars().skip(a).take(b - a).collect()
-                };
-                let (before, selected, after) = (
-                    take(0, lo),
-                    take(lo, hi),
-                    take(hi, view.value.chars().count()),
-                );
-                self.clipped(inner, |c| {
-                    c.fill_rect(sel_x, ty, (sel_end - sel_x).max(1), line_h, paint.accent);
-                    let draw = |c: &mut Self, x: i32, s: &str, rgb: [u8; 3]| match fonts.text {
-                        Some(f) => c.text_font(f, x, ty, s, rgb),
-                        None => c.text_bitmap(x, ty, BSCALE, s, rgb),
-                    };
-                    draw(c, text_x, &before, color);
-                    draw(c, sel_x, &selected, [0xFF, 0xFF, 0xFF]);
-                    draw(c, sel_end, &after, color);
-                });
-            }
-            None => {
-                self.clipped(inner, |c| match fonts.text {
-                    Some(f) => c.text_font(f, text_x, ty, text, color),
-                    None => c.text_bitmap(text_x, ty, BSCALE, text, color),
-                });
-            }
+        // The band goes down first, then the text runs across it in a **single pass** — one
+        // pen for the whole string, so a glyph sits in the same column whether or not it
+        // happens to be selected. Drawing before/selected/after as three runs made the
+        // letters shift as the selection grew, because each run restarted the pen on an
+        // integer and so threw away the fractional advance.
+        if let Some((lo, hi)) = selection {
+            let (sel_x, sel_end) = (
+                pen_x(fonts.text, text_x, &view.value, lo),
+                pen_x(fonts.text, text_x, &view.value, hi),
+            );
+            self.clipped(inner, |c| {
+                c.fill_rect(sel_x, ty, (sel_end - sel_x).max(1), line_h, paint.accent)
+            });
         }
+        let color_of = |i: usize| match selection {
+            Some((lo, hi)) if i >= lo && i < hi => [0xFF, 0xFF, 0xFF],
+            _ => color,
+        };
+        self.clipped(inner, |c| match fonts.text {
+            Some(f) => c.text_font_with(f, text_x, ty, text, color_of),
+            None => c.text_bitmap_with(text_x, ty, BSCALE, text, color_of),
+        });
 
         // The caret belongs to focus, not to content: a focused empty field shows one. It is
         // hidden while a selection is up — the highlight already says where you are.
         if state.caret_on && state.focused && view.selection.is_none() {
-            let caret_x = run_x(view.caret);
+            let caret_x = pen_x(fonts.text, text_x, &view.value, view.caret);
             let (top, bottom) = (ty as f32, (ty + line_h) as f32);
             self.clipped(inner, |c| {
                 c.thick_line(
@@ -1847,6 +1887,84 @@ mod tests {
             },
             32,
         )
+    }
+
+    #[test]
+    fn growing_a_selection_does_not_move_the_letters() {
+        // Fractional advances are the whole point here, so this needs a real font. Narrow
+        // glyphs make any per-run pen reset show up immediately.
+        let Some(font) = Font::system("", 24.0, false, false) else {
+            return;
+        };
+        let fonts = AskFonts::new(Some(&font));
+        let text = "illicit filling illicit";
+
+        let render = |anchor: usize, caret: usize| {
+            let layout = selected_layout(text, anchor, caret);
+            let (w, h) = ask_size(&fonts, &layout, 2.0);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            paint_ask_into(
+                &mut buf,
+                w,
+                h,
+                &layout,
+                false,
+                &BalloonPaint::default(),
+                &fonts,
+                // No caret, so only the glyphs and the band can account for a difference.
+                &AskState {
+                    focused: true,
+                    caret_on: false,
+                    ..AskState::default()
+                },
+                2.0,
+            );
+            (buf, w, h)
+        };
+
+        // The tail of the string is untouched by a selection that ends before it, so those
+        // columns must be pixel-identical however far the selection has grown.
+        let tail_from = |n: usize| {
+            let layout = selected_layout(text, 0, n);
+            let (w, _) = ask_size(&fonts, &layout, 2.0);
+            let field = ask_rects(&layout, &fonts, w, false, 2.0)
+                .into_iter()
+                .find(|r| r.hit == AskHit::Input)
+                .unwrap();
+            let (tx, _) = input_text_origin(
+                layout.input.as_ref().unwrap(),
+                &fonts,
+                field.x,
+                field.w,
+                2.0,
+            );
+            pen_x(fonts.text, tx, text, 16) // start of the last word
+        };
+        let cut = tail_from(4);
+        assert_eq!(
+            cut,
+            tail_from(9),
+            "the tail must not move as the selection grows"
+        );
+
+        // Report the first differing pixel rather than dumping two whole buffers.
+        let (a, w, h) = render(0, 4);
+        let (b, _, _) = render(0, 9);
+        let mut differs = None;
+        'scan: for y in 0..h {
+            for x in cut.max(0) as u32..w {
+                let o = ((y * w + x) * 4) as usize;
+                if a[o..o + 4] != b[o..o + 4] {
+                    differs = Some((x, y));
+                    break 'scan;
+                }
+            }
+        }
+        assert_eq!(
+            differs, None,
+            "text past the selection must render identically whatever the selection is; \
+             first difference at this pixel (selection ends at x={cut})"
+        );
     }
 
     #[test]
