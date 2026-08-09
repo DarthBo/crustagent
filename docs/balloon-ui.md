@@ -419,6 +419,11 @@ Two things follow:
   navigation: `Back  Next  Close` must not become `Close  Next  Back`. Back belongs before Next in
   either layout; it is the auxiliary button that moves, giving `Close  Back  Next`.
 
+The **group itself is right-aligned**, flush with the content's right edge. That part is *not* a
+policy — dialog buttons sit bottom-right on every platform; only the order within the group differs.
+Because the group's position depends on the final row width, the metrics store each button's offset
+from the *start of the group* and the paint and hit-test align it, so the two cannot disagree.
+
 Any test that asserts a drawn button order must pin `button_order` explicitly, or it asserts the
 build platform instead.
 

@@ -498,11 +498,24 @@ struct RowMetric {
 /// click can never land somewhere the pixels don't.
 struct AskMetrics {
     rows: Vec<RowMetric>,
-    /// `(dx, width)` per commit button, left to right.
+    /// `(dx, width)` per commit button, left to right, measured from the **start of the
+    /// button group** rather than from the content edge — the group is right-aligned, and
+    /// only the paint / hit-test know the final row width to align it against.
     buttons: Vec<(i32, i32)>,
+    /// Total width of that group, gaps included.
+    buttons_w: i32,
     marker_w: i32,
     w: i32,
     h: i32,
+}
+
+impl AskMetrics {
+    /// Where the commit-button group starts, given the row width it sits in. Dialog buttons
+    /// are right-aligned on every platform — it is the order *within* the group that differs
+    /// (see `ButtonOrder`).
+    fn buttons_x(&self, x0: i32, row_w: i32) -> i32 {
+        x0 + (row_w - self.buttons_w).max(0)
+    }
 }
 
 fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
@@ -529,6 +542,7 @@ fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
 
     let mut rows = Vec::with_capacity(layout.rows.len());
     let mut buttons = Vec::new();
+    let mut buttons_w = 0;
     let (mut y, mut w) = (0, 0);
     let (mut seen_choice, mut seen_check) = (false, false);
     let (mut in_heading, mut heading_closed) = (false, false);
@@ -588,7 +602,8 @@ fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
                 buttons.push((dx, bw));
                 dx += bw + btn_gap;
             }
-            w = w.max((dx - btn_gap).max(0));
+            buttons_w = (dx - btn_gap).max(0);
+            w = w.max(buttons_w);
             rows.push(RowMetric {
                 dy: y,
                 h,
@@ -610,6 +625,7 @@ fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
     AskMetrics {
         rows,
         buttons,
+        buttons_w,
         marker_w,
         w: w.max(1),
         h: y.max(1),
@@ -761,10 +777,11 @@ pub fn ask_rects(
                 h,
             }),
             AskRole::Buttons => {
+                let group_x = m.buttons_x(x0, row_w);
                 for (button, &(dx, bw)) in layout.buttons.iter().zip(&m.buttons) {
                     out.push(AskRect {
                         hit: AskHit::Button(*button),
-                        x: x0 + dx,
+                        x: group_x + dx,
                         y,
                         w: bw,
                         h,
@@ -1231,10 +1248,11 @@ impl Canvas<'_> {
             }
 
             if row.role == AskRole::Buttons {
+                let group_x = m.buttons_x(x0, (self.w - 2 * x0).max(1));
                 for (button, &(dx, bw)) in layout.buttons.iter().zip(&m.buttons) {
                     let phase = state.phase(AskHit::Button(*button));
                     self.button(
-                        x0 + dx,
+                        group_x + dx,
                         y,
                         bw,
                         metric.h,
@@ -1702,6 +1720,21 @@ mod tests {
         assert!(
             buttons[1].x >= buttons[0].x + buttons[0].w,
             "the second button sits right of the first without overlapping: {buttons:?}"
+        );
+
+        // The group is right-aligned: its last button ends at the content's right edge, the
+        // way dialog buttons sit on every platform.
+        let (x0, _) = ask_origin(2.0, false);
+        let row_right = x0 + (w as i32 - 2 * x0);
+        let last = buttons.last().unwrap();
+        assert_eq!(
+            last.x + last.w,
+            row_right,
+            "the button group should end flush right: {buttons:?}"
+        );
+        assert!(
+            buttons[0].x > x0,
+            "...and so start well inside the left edge"
         );
 
         // Same again through the real-font measuring path, which is what actually ships
