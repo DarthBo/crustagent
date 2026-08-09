@@ -19,3 +19,4 @@ winit = "0.30"
 wgpu = "30"
 pollster = "1"
 font8x8 = "0.3"
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }

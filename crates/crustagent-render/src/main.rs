@@ -34,6 +34,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::ModifiersState;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
@@ -43,6 +44,8 @@ const GAP: i32 = 4; // px between balloon and character
 const MENU_MAX_H: i32 = 640; // tall menus scroll instead of growing past this
 /// Half-period of the text field's caret blink.
 const CARET_BLINK: Duration = Duration::from_millis(530);
+/// Two clicks inside this window (and near enough together) select a word.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// All actions: play any of the character's animations (sorted), plus Speak and Hide.
 fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
@@ -192,6 +195,14 @@ struct App {
     caret_blinked: Instant,
     /// Whether the balloon window has been given the keyboard for the current question.
     ask_focused: bool,
+    /// Live keyboard modifiers, for shift-selection and the clipboard shortcuts.
+    modifiers: ModifiersState,
+    /// Whether a drag through the text field is in progress (selecting as it moves).
+    field_dragging: bool,
+    /// When and where the field was last clicked, for double-click-to-select-word.
+    last_field_click: Option<(Instant, i32)>,
+    /// System clipboard, opened lazily — a headless session may have none.
+    clipboard: Option<arboard::Clipboard>,
 
     // command menu (its own scrollable window)
     menu_window: Option<Arc<Window>>,
@@ -408,6 +419,29 @@ impl App {
         )
     }
 
+    /// Put the field's selection on the system clipboard, cutting it when `cut`. Does
+    /// nothing without a selection — copying a caret is not a useful thing to do.
+    fn copy_field(&mut self, cut: bool) {
+        let selected = self.agent.ask_selected_text().to_string();
+        if selected.is_empty() {
+            return;
+        }
+        if let Some(clip) = self.clipboard.as_mut() {
+            let _ = clip.set_text(selected);
+        }
+        if cut {
+            self.agent.report_ask_delete_selection();
+        }
+    }
+
+    /// Insert the clipboard's text at the caret, replacing any selection.
+    fn paste_field(&mut self) {
+        let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else {
+            return;
+        };
+        self.agent.report_ask_text(&text);
+    }
+
     /// Focus (or blur) the balloon's text field, resetting the caret blink so it is solid
     /// the instant focus lands rather than half-way through an off phase.
     fn focus_field(&mut self, focused: bool) {
@@ -521,32 +555,73 @@ impl ApplicationHandler for App {
             }
             // A balloon with a text field swallows the keyboard: otherwise typing "q" into
             // the question would quit the app.
+            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && self.agent.ask_has_input() =>
             {
+                let shift = self.modifiers.shift_key();
+                // The clipboard/select-all accelerator: Cmd on macOS, Ctrl elsewhere.
+                let accel = if cfg!(target_os = "macos") {
+                    self.modifiers.super_key()
+                } else {
+                    self.modifiers.control_key()
+                };
+                // Word-wise movement: Alt on macOS, Ctrl elsewhere.
+                let word = if cfg!(target_os = "macos") {
+                    self.modifiers.alt_key()
+                } else {
+                    self.modifiers.control_key()
+                };
                 match event.physical_key {
+                    PhysicalKey::Code(KeyCode::KeyA) if accel => {
+                        self.agent.report_ask_edit(AskEdit::SelectAll)
+                    }
+                    PhysicalKey::Code(KeyCode::KeyC) if accel => self.copy_field(false),
+                    PhysicalKey::Code(KeyCode::KeyX) if accel => self.copy_field(true),
+                    PhysicalKey::Code(KeyCode::KeyV) if accel => self.paste_field(),
                     PhysicalKey::Code(KeyCode::Escape) => self.agent.dismiss_ask(),
                     PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
                         self.agent.report_ask_submit()
                     }
-                    PhysicalKey::Code(KeyCode::Backspace) => {
-                        self.agent.report_ask_edit(AskEdit::Backspace)
-                    }
+                    PhysicalKey::Code(KeyCode::Backspace) => self.agent.report_ask_edit(if word {
+                        AskEdit::DeleteWordBack
+                    } else {
+                        AskEdit::Backspace
+                    }),
                     PhysicalKey::Code(KeyCode::Delete) => {
                         self.agent.report_ask_edit(AskEdit::Delete)
                     }
                     PhysicalKey::Code(KeyCode::ArrowLeft) => {
-                        self.agent.report_ask_edit(AskEdit::Left)
+                        self.agent.report_ask_edit(match (shift, word) {
+                            (true, true) => AskEdit::SelectWordLeft,
+                            (true, false) => AskEdit::SelectLeft,
+                            (false, true) => AskEdit::WordLeft,
+                            (false, false) => AskEdit::Left,
+                        })
                     }
                     PhysicalKey::Code(KeyCode::ArrowRight) => {
-                        self.agent.report_ask_edit(AskEdit::Right)
+                        self.agent.report_ask_edit(match (shift, word) {
+                            (true, true) => AskEdit::SelectWordRight,
+                            (true, false) => AskEdit::SelectRight,
+                            (false, true) => AskEdit::WordRight,
+                            (false, false) => AskEdit::Right,
+                        })
                     }
-                    PhysicalKey::Code(KeyCode::Home) => self.agent.report_ask_edit(AskEdit::Home),
-                    PhysicalKey::Code(KeyCode::End) => self.agent.report_ask_edit(AskEdit::End),
+                    PhysicalKey::Code(KeyCode::Home) => self.agent.report_ask_edit(if shift {
+                        AskEdit::SelectHome
+                    } else {
+                        AskEdit::Home
+                    }),
+                    PhysicalKey::Code(KeyCode::End) => self.agent.report_ask_edit(if shift {
+                        AskEdit::SelectEnd
+                    } else {
+                        AskEdit::End
+                    }),
                     // Everything else is text if it produced any (control chars are dropped
-                    // agent-side, so dead keys and modifiers cost nothing here).
+                    // agent-side, so dead keys and modifiers cost nothing here). Accelerator
+                    // combinations are never text.
                     _ => {
-                        if let Some(text) = &event.text {
+                        if let (Some(text), false) = (&event.text, accel) {
                             self.agent.report_ask_text(text);
                         }
                     }
@@ -577,6 +652,16 @@ impl ApplicationHandler for App {
                     self.cursor = (position.x as i32, position.y as i32);
                 } else if is_balloon {
                     self.balloon_cursor = (position.x as i32, position.y as i32);
+                    if self.field_dragging {
+                        // Dragging through the field selects, rather than re-placing the
+                        // caret: the anchor stays where the press landed.
+                        if let Some(caret) = self.ask_caret_at_cursor() {
+                            self.agent.report_ask_select_to(caret);
+                        }
+                        if let Some(win) = &self.balloon_window {
+                            win.request_redraw();
+                        }
+                    }
                     let hover = self.ask_hit();
                     self.set_ask_state(hover, self.ask_state.pressed);
                 } else if is_menu {
@@ -641,8 +726,24 @@ impl ApplicationHandler for App {
                         // Clicking into the field focuses it: the placeholder gives way to a
                         // caret, placed where the click landed.
                         if let Some(caret) = self.ask_caret_at_cursor() {
-                            self.agent.report_ask_caret(caret);
+                            let now = Instant::now();
+                            let double = self.last_field_click.is_some_and(|(t, x)| {
+                                now.duration_since(t) < DOUBLE_CLICK
+                                    && (x - self.balloon_cursor.0).abs() < 4
+                            });
+                            if double {
+                                self.agent.report_ask_select_word(caret);
+                                self.last_field_click = None; // a triple click starts over
+                            } else if self.modifiers.shift_key() {
+                                // Shifted click extends from wherever the caret was.
+                                self.agent.report_ask_select_to(caret);
+                                self.last_field_click = Some((now, self.balloon_cursor.0));
+                            } else {
+                                self.agent.report_ask_caret(caret);
+                                self.last_field_click = Some((now, self.balloon_cursor.0));
+                            }
                         }
+                        self.field_dragging = true;
                         self.focus_field(true);
                     } else if hit.is_some() {
                         self.focus_field(false);
@@ -660,6 +761,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                self.field_dragging = false;
                 // The commit: only if the release lands on the control the press armed.
                 // Releasing elsewhere cancels it, leaving the balloon up.
                 if let Some(armed) = self.ask_state.pressed.take() {
@@ -989,13 +1091,22 @@ fn main() {
                     .input("Type your question here")
                     .buttons(ButtonSet::SearchClose),
                 false,
-                crustagent::AskAnswer {
-                    text: "How do I do mail merge?".into(),
-                    caret: 9,
-                    ..Default::default()
-                },
+                crustagent::AskAnswer::at("How do I do mail merge?", 9),
                 AskState {
                     hover: Some(crustagent::AskHit::Button(crustagent::Button::Search)),
+                    focused: true,
+                    ..AskState::default()
+                },
+            ),
+            (
+                "Search: a selection, highlighted (the caret hides)",
+                BalloonUi::new("Type your question, then click Search.")
+                    .heading("What would you like to do?")
+                    .input("Type your question here")
+                    .buttons(ButtonSet::SearchClose),
+                false,
+                crustagent::AskAnswer::selecting("How do I do mail merge?", 9, 18),
+                AskState {
                     focused: true,
                     ..AskState::default()
                 },
@@ -1006,11 +1117,10 @@ fn main() {
                     .input("Search")
                     .buttons(ButtonSet::SearchClose),
                 false,
-                crustagent::AskAnswer {
-                    text: "a question far too long to fit inside the field at once".into(),
-                    caret: 55,
-                    ..Default::default()
-                },
+                crustagent::AskAnswer::at(
+                    "a question far too long to fit inside the field at once",
+                    55,
+                ),
                 AskState {
                     focused: true,
                     ..AskState::default()
@@ -1217,6 +1327,10 @@ fn main() {
         ask_state: AskState::default(),
         caret_blinked: Instant::now(),
         ask_focused: false,
+        modifiers: ModifiersState::empty(),
+        field_dragging: false,
+        last_field_click: None,
+        clipboard: arboard::Clipboard::new().ok(),
         menu_window: None,
         menu_presenter: None,
         menu_scratch: Vec::new(),

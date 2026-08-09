@@ -975,3 +975,143 @@ fn clicking_the_field_does_not_answer_the_question() {
         .iter()
         .any(|e| matches!(e, crustagent::Event::Answered { .. })));
 }
+
+// -- selection and clipboard ---------------------------------------------------------------
+
+/// A field pre-filled with `text`, caret at the end.
+fn typed_agent(text: &str) -> Agent {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+    agent.report_ask_text(text);
+    let _ = agent.drain_events();
+    agent
+}
+
+#[test]
+fn shift_arrows_extend_a_selection_and_a_bare_arrow_collapses_it() {
+    let mut agent = typed_agent("hello world");
+    agent.report_ask_edit(AskEdit::Home);
+    assert_eq!(agent.ask_selection(), None);
+
+    agent.report_ask_edit(AskEdit::SelectRight);
+    agent.report_ask_edit(AskEdit::SelectRight);
+    assert_eq!(agent.ask_selection(), Some((0, 2)));
+    assert_eq!(agent.ask_selected_text(), "he");
+
+    // A bare arrow collapses to the edge it points at rather than stepping off the caret.
+    agent.report_ask_edit(AskEdit::Left);
+    assert_eq!(agent.ask_selection(), None);
+    assert_eq!(agent.ask_caret(), 0);
+
+    agent.report_ask_edit(AskEdit::SelectEnd);
+    assert_eq!(agent.ask_selected_text(), "hello world");
+    agent.report_ask_edit(AskEdit::Right);
+    assert_eq!(agent.ask_caret(), 11);
+    assert_eq!(agent.ask_selection(), None);
+}
+
+#[test]
+fn a_selection_can_be_dragged_backwards() {
+    let mut agent = typed_agent("hello world");
+    agent.report_ask_caret(5);
+    agent.report_ask_select_to(2);
+    // The anchor stays put, so the range normalises whichever way it was drawn.
+    assert_eq!(agent.ask_selection(), Some((2, 5)));
+    assert_eq!(agent.ask_selected_text(), "llo");
+    assert_eq!(agent.ask_caret(), 2);
+}
+
+#[test]
+fn select_all_and_word_selection() {
+    let mut agent = typed_agent("hello big world");
+    agent.report_ask_edit(AskEdit::SelectAll);
+    assert_eq!(agent.ask_selected_text(), "hello big world");
+
+    // A double-click inside a word takes the whole word, not the spaces around it.
+    agent.report_ask_select_word(7);
+    assert_eq!(agent.ask_selected_text(), "big");
+    agent.report_ask_select_word(0);
+    assert_eq!(agent.ask_selected_text(), "hello");
+    // ...and inside a run of spaces, the spaces.
+    agent.report_ask_select_word(5);
+    assert_eq!(agent.ask_selected_text(), " ");
+}
+
+#[test]
+fn typing_and_deleting_replace_the_selection() {
+    let mut agent = typed_agent("hello world");
+    agent.report_ask_caret(0);
+    agent.report_ask_select_to(5);
+    agent.report_ask_text("goodbye");
+    assert_eq!(agent.ask_text(), "goodbye world");
+    assert_eq!(agent.ask_caret(), 7);
+    assert_eq!(agent.ask_selection(), None);
+
+    agent.report_ask_caret(7);
+    agent.report_ask_select_to(13);
+    agent.report_ask_edit(AskEdit::Backspace);
+    assert_eq!(agent.ask_text(), "goodbye");
+
+    // Backspace with no selection still eats one char.
+    agent.report_ask_edit(AskEdit::Backspace);
+    assert_eq!(agent.ask_text(), "goodby");
+}
+
+#[test]
+fn cut_is_copy_then_delete_selection() {
+    // The agent has no clipboard — a host reads `ask_selected_text` for it and then asks
+    // for the delete. This is that second half.
+    let mut agent = typed_agent("hello world");
+    agent.report_ask_caret(6);
+    agent.report_ask_edit(AskEdit::SelectEnd);
+    assert_eq!(agent.ask_selected_text(), "world");
+
+    agent.report_ask_delete_selection();
+    assert_eq!(agent.ask_text(), "hello ");
+    assert_eq!(agent.ask_caret(), 6);
+    assert_eq!(agent.ask_selected_text(), "");
+}
+
+#[test]
+fn word_movement_steps_over_words_not_chars() {
+    let mut agent = typed_agent("hello big world");
+    agent.report_ask_edit(AskEdit::Home);
+    agent.report_ask_edit(AskEdit::WordRight);
+    assert_eq!(agent.ask_caret(), 6, "past 'hello' and its space");
+    agent.report_ask_edit(AskEdit::WordRight);
+    assert_eq!(agent.ask_caret(), 10);
+    agent.report_ask_edit(AskEdit::WordLeft);
+    assert_eq!(agent.ask_caret(), 6);
+
+    agent.report_ask_edit(AskEdit::End);
+    agent.report_ask_edit(AskEdit::DeleteWordBack);
+    assert_eq!(agent.ask_text(), "hello big ");
+    agent.report_ask_edit(AskEdit::SelectWordLeft);
+    assert_eq!(agent.ask_selected_text(), "big ");
+}
+
+#[test]
+fn selection_survives_multibyte_text() {
+    let mut agent = typed_agent("héllo wörld 🌍");
+    agent.report_ask_caret(0);
+    agent.report_ask_select_to(5);
+    assert_eq!(agent.ask_selected_text(), "héllo");
+
+    agent.report_ask_select_word(7);
+    assert_eq!(agent.ask_selected_text(), "wörld");
+
+    agent.report_ask_edit(AskEdit::SelectAll);
+    agent.report_ask_text("ok");
+    assert_eq!(agent.ask_text(), "ok");
+}
+
+#[test]
+fn the_selection_reaches_the_renderer() {
+    let mut agent = typed_agent("hello world");
+    agent.report_ask_caret(0);
+    agent.report_ask_select_to(5);
+    let view = agent.balloon().unwrap().ask.unwrap().input.unwrap();
+    assert_eq!(view.selection, Some((0, 5)));
+    assert_eq!(view.value, "hello world");
+}

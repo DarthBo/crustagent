@@ -315,8 +315,12 @@ pub struct AskAnswer {
     /// The text field's contents.
     pub text: String,
     /// Caret position in `text`, as a **char** offset (clamped on use, so it can never split
-    /// a multi-byte character).
+    /// a multi-byte character). This is the *moving* end of a selection.
     pub caret: usize,
+    /// The fixed end of the selection — where it was started — or `None` when there is no
+    /// selection, which is the common case. Optional rather than "equal to `caret`" so that
+    /// building an answer with just a caret cannot accidentally select from 0.
+    pub anchor: Option<usize>,
 }
 
 impl AskAnswer {
@@ -330,7 +334,25 @@ impl AskAnswer {
         AskAnswer {
             checked: 0,
             caret: text.chars().count(),
+            anchor: None,
             text,
+        }
+    }
+    /// An answer whose field holds `text` with the caret at `caret` and nothing selected.
+    pub fn at(text: impl Into<String>, caret: usize) -> AskAnswer {
+        AskAnswer {
+            text: text.into(),
+            caret,
+            ..Default::default()
+        }
+    }
+    /// An answer whose field holds `text` with `anchor..caret` selected.
+    pub fn selecting(text: impl Into<String>, anchor: usize, caret: usize) -> AskAnswer {
+        AskAnswer {
+            text: text.into(),
+            caret,
+            anchor: Some(anchor),
+            ..Default::default()
         }
     }
     /// An answer with only check boxes ticked — the common case in tests.
@@ -346,12 +368,118 @@ impl AskAnswer {
     }
     /// Byte index of the caret, for slicing `text`.
     pub fn caret_byte(&self) -> usize {
+        self.byte_of(self.caret_char())
+    }
+    /// Byte index of char offset `n`, clamped to the end of `text`.
+    pub fn byte_of(&self, n: usize) -> usize {
         self.text
             .char_indices()
-            .nth(self.caret_char())
+            .nth(n)
             .map(|(i, _)| i)
             .unwrap_or(self.text.len())
     }
+    /// The number of chars in `text`.
+    pub fn len_chars(&self) -> usize {
+        self.text.chars().count()
+    }
+    /// The selected range as **char** offsets, low end first, or `None` when the caret is
+    /// just a caret.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let a = self.anchor?.min(self.len_chars());
+        let b = self.caret_char();
+        let (lo, hi) = (a.min(b), a.max(b));
+        (lo != hi).then_some((lo, hi))
+    }
+    /// The selected text, or `""` when nothing is selected.
+    pub fn selected_text(&self) -> &str {
+        match self.selection() {
+            Some((lo, hi)) => &self.text[self.byte_of(lo)..self.byte_of(hi)],
+            None => "",
+        }
+    }
+    /// Collapse any selection, leaving the caret at `n` (clamped).
+    pub fn set_caret(&mut self, n: usize) {
+        self.caret = n.min(self.len_chars());
+        self.anchor = None;
+    }
+    /// Move the caret to `n`, dragging the selection with it (the anchor stays put).
+    pub fn select_to(&mut self, n: usize) {
+        let from = self.caret_char();
+        self.anchor.get_or_insert(from);
+        self.caret = n.min(self.len_chars());
+    }
+    /// Delete the selection, if any, leaving the caret where it was. Returns whether
+    /// anything was removed.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some((lo, hi)) = self.selection() else {
+            return false;
+        };
+        let (a, b) = (self.byte_of(lo), self.byte_of(hi));
+        self.text.replace_range(a..b, "");
+        self.set_caret(lo);
+        true
+    }
+}
+
+/// Whether `c` is part of a word, for word-wise movement and double-click selection.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The word-ish run containing char offset `n` — a run of word characters, of whitespace, or
+/// of punctuation, whichever `n` sits in. Used for double-click-to-select.
+pub fn word_at(text: &str, n: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    // A click past the last char selects the run ending there.
+    let at = n.min(chars.len() - 1);
+    let class = |c: char| {
+        if is_word_char(c) {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let want = class(chars[at]);
+    let mut lo = at;
+    while lo > 0 && class(chars[lo - 1]) == want {
+        lo -= 1;
+    }
+    let mut hi = at + 1;
+    while hi < chars.len() && class(chars[hi]) == want {
+        hi += 1;
+    }
+    (lo, hi)
+}
+
+/// The offset a word-wise move left from `n` lands on: skip any whitespace, then the word.
+pub fn word_left(text: &str, n: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = n.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// The offset a word-wise move right from `n` lands on: skip the word, then any whitespace.
+pub fn word_right(text: &str, n: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = n.min(chars.len());
+    while i < chars.len() && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
 }
 
 /// How the text field should be drawn, when the question has one.
@@ -363,8 +491,10 @@ pub struct InputView {
     /// also sizes the field from this rather than from `value`, so the box doesn't resize as
     /// the value is typed — the field scrolls instead.
     pub prompt: String,
-    /// Caret position as a char offset into `value`.
+    /// Caret position as a char offset into `value` — the moving end of the selection.
     pub caret: usize,
+    /// The selected range as char offsets, low end first, when there is one.
+    pub selection: Option<(usize, usize)>,
     /// Index into [`AskLayout::rows`] of the [`AskRole::Input`] row.
     pub row: usize,
 }
@@ -512,6 +642,7 @@ pub fn layout_ask(ui: &BalloonUi, answer: &AskAnswer, per_line: usize) -> AskLay
             value: answer.text.clone(),
             prompt: field.placeholder.clone(),
             caret: answer.caret_char(),
+            selection: answer.selection(),
             row: rows.len(),
         };
         rows.push(AskRow {
@@ -678,11 +809,7 @@ mod tests {
         assert!(!view.shows_prompt(true));
         assert_eq!(view.display(true), "");
 
-        let typed = AskAnswer {
-            text: "mail merge".into(),
-            caret: 4,
-            ..Default::default()
-        };
+        let typed = AskAnswer::at("mail merge", 4);
         let view = layout_ask(&ui, &typed, 40).input.unwrap();
         // With a value there is no hint either way.
         assert!(!view.shows_prompt(false) && !view.shows_prompt(true));
@@ -703,33 +830,78 @@ mod tests {
     #[test]
     fn the_caret_never_splits_a_multibyte_char() {
         // Four chars, seven bytes — a byte-indexed caret would slice mid-character.
-        let answer = AskAnswer {
-            text: "héllo".into(),
-            caret: 2,
-            ..Default::default()
-        };
+        let answer = AskAnswer::at("héllo", 2);
         assert_eq!(answer.caret_byte(), 3);
         assert!(answer.text.is_char_boundary(answer.caret_byte()));
 
         // Past the end, it clamps rather than panicking.
-        let past = AskAnswer {
-            text: "hé".into(),
-            caret: 99,
-            ..Default::default()
-        };
+        let past = AskAnswer::at("hé", 99);
         assert_eq!(past.caret_char(), 2);
         assert_eq!(past.caret_byte(), past.text.len());
+    }
+
+    #[test]
+    fn word_runs_are_classified_by_what_you_clicked_in() {
+        let t = "hello, big  world";
+        assert_eq!(word_at(t, 0), (0, 5), "a word");
+        assert_eq!(word_at(t, 5), (5, 6), "the comma, alone");
+        assert_eq!(word_at(t, 6), (6, 7), "the space between");
+        assert_eq!(word_at(t, 8), (7, 10), "'big'");
+        assert_eq!(word_at(t, 10), (10, 12), "the double space, as one run");
+        // Clicking past the end selects the run that ends there rather than panicking.
+        assert_eq!(word_at(t, 99), (12, 17));
+        assert_eq!(word_at("", 3), (0, 0));
+    }
+
+    #[test]
+    fn word_movement_skips_whitespace_with_the_word() {
+        let t = "hello big  world";
+        assert_eq!(word_right(t, 0), 6, "past 'hello' and its space");
+        assert_eq!(word_right(t, 6), 11, "past 'big' and both spaces");
+        assert_eq!(word_right(t, 11), 16);
+        assert_eq!(word_right(t, 16), 16, "already at the end");
+
+        assert_eq!(word_left(t, 16), 11);
+        assert_eq!(word_left(t, 11), 6);
+        assert_eq!(word_left(t, 6), 0);
+        assert_eq!(word_left(t, 0), 0);
+    }
+
+    #[test]
+    fn a_selection_normalises_whichever_way_it_was_drawn() {
+        let mut a = AskAnswer::at("hello world", 0);
+        assert_eq!(a.selection(), None, "a bare caret selects nothing");
+
+        a.set_caret(5);
+        a.select_to(2);
+        assert_eq!(a.selection(), Some((2, 5)), "drawn backwards");
+        assert_eq!(a.selected_text(), "llo");
+        assert_eq!(a.caret, 2, "the caret is the moving end");
+
+        a.set_caret(0);
+        assert_eq!(a.selection(), None, "placing the caret collapses it");
+    }
+
+    #[test]
+    fn deleting_a_selection_leaves_the_caret_at_its_start() {
+        let mut a = AskAnswer::at("hello world", 0);
+        a.set_caret(5);
+        a.select_to(11);
+        assert!(a.delete_selection());
+        assert_eq!(a.text, "hello");
+        assert_eq!(a.caret, 5);
+        assert_eq!(a.selection(), None);
+        assert!(!a.delete_selection(), "nothing left to delete");
     }
 
     #[test]
     fn a_long_value_stays_on_one_row() {
         // The field scrolls rather than wrapping, so the balloon doesn't grow as you type.
         let ui = BalloonUi::new("").input("Search");
-        let answer = AskAnswer {
-            text: "a very long question that would wrap over several lines if it could".into(),
-            caret: 0,
-            ..Default::default()
-        };
+        let answer = AskAnswer::at(
+            "a very long question that would wrap over several lines if it could",
+            0,
+        );
         let l = layout_ask(&ui, &answer, 16);
         assert_eq!(
             l.rows.iter().filter(|r| r.role == AskRole::Input).count(),

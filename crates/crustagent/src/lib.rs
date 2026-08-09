@@ -94,20 +94,43 @@ pub enum MouseButton {
 }
 
 /// An editing key applied to a balloon's text field via [`Agent::report_ask_edit`].
+///
+/// The `Select*` variants extend the selection instead of collapsing it — what the same key
+/// does with Shift held. Deleting or typing over a selection replaces it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AskEdit {
-    /// Delete the char before the caret.
+    /// Delete the selection, or the char before the caret.
     Backspace,
-    /// Delete the char after the caret.
+    /// Delete the selection, or the char after the caret.
     Delete,
-    /// Move the caret one char left.
+    /// Delete the word before the caret.
+    DeleteWordBack,
+    /// Move the caret one char left (or collapse a selection to its left edge).
     Left,
-    /// Move the caret one char right.
+    /// Move the caret one char right (or collapse a selection to its right edge).
     Right,
+    /// Move the caret one word left.
+    WordLeft,
+    /// Move the caret one word right.
+    WordRight,
     /// Move the caret to the start.
     Home,
     /// Move the caret to the end.
     End,
+    /// Extend the selection one char left.
+    SelectLeft,
+    /// Extend the selection one char right.
+    SelectRight,
+    /// Extend the selection one word left.
+    SelectWordLeft,
+    /// Extend the selection one word right.
+    SelectWordRight,
+    /// Extend the selection to the start.
+    SelectHome,
+    /// Extend the selection to the end.
+    SelectEnd,
+    /// Select the whole field.
+    SelectAll,
     /// Empty the field.
     Clear,
 }
@@ -680,9 +703,12 @@ impl Agent {
         if clean.is_empty() {
             return;
         }
+        // Typing over a selection replaces it — including a paste, which is the same path.
+        self.ask_answer.delete_selection();
         let at = self.ask_answer.caret_byte();
         self.ask_answer.text.insert_str(at, &clean);
-        self.ask_answer.caret = self.ask_answer.caret_char() + clean.chars().count();
+        self.ask_answer
+            .set_caret(self.ask_answer.caret_char() + clean.chars().count());
     }
 
     /// Apply an editing key to the active question's field.
@@ -690,35 +716,114 @@ impl Agent {
         if !self.ask_has_input() {
             return;
         }
-        let caret = self.ask_answer.caret_char();
-        let len = self.ask_answer.text.chars().count();
+        let a = &mut self.ask_answer;
+        let caret = a.caret_char();
+        let len = a.len_chars();
+        let selection = a.selection();
         match edit {
-            AskEdit::Backspace if caret > 0 => {
-                self.ask_answer.caret = caret - 1;
-                let at = self.ask_answer.caret_byte();
-                self.ask_answer.text.remove(at);
+            // Deleting with a selection replaces it; without one it eats a char.
+            AskEdit::Backspace => {
+                if !a.delete_selection() && caret > 0 {
+                    a.set_caret(caret - 1);
+                    let at = a.caret_byte();
+                    a.text.remove(at);
+                }
             }
-            AskEdit::Delete if caret < len => {
-                let at = self.ask_answer.caret_byte();
-                self.ask_answer.text.remove(at);
+            AskEdit::Delete => {
+                if !a.delete_selection() && caret < len {
+                    let at = a.caret_byte();
+                    a.text.remove(at);
+                }
             }
-            AskEdit::Left => self.ask_answer.caret = caret.saturating_sub(1),
-            AskEdit::Right => self.ask_answer.caret = (caret + 1).min(len),
-            AskEdit::Home => self.ask_answer.caret = 0,
-            AskEdit::End => self.ask_answer.caret = len,
+            AskEdit::DeleteWordBack => {
+                if !a.delete_selection() {
+                    let to = crustagent_core::ask::word_left(&a.text, caret);
+                    let (from, until) = (a.byte_of(to), a.byte_of(caret));
+                    a.text.replace_range(from..until, "");
+                    a.set_caret(to);
+                }
+            }
+            // A bare arrow collapses a selection to the edge it points at, rather than
+            // stepping off the caret — the behaviour every text field has.
+            AskEdit::Left => match selection {
+                Some((lo, _)) => a.set_caret(lo),
+                None => a.set_caret(caret.saturating_sub(1)),
+            },
+            AskEdit::Right => match selection {
+                Some((_, hi)) => a.set_caret(hi),
+                None => a.set_caret(caret + 1),
+            },
+            AskEdit::WordLeft => {
+                let to = crustagent_core::ask::word_left(&a.text, caret);
+                a.set_caret(to);
+            }
+            AskEdit::WordRight => {
+                let to = crustagent_core::ask::word_right(&a.text, caret);
+                a.set_caret(to);
+            }
+            AskEdit::Home => a.set_caret(0),
+            AskEdit::End => a.set_caret(len),
+            AskEdit::SelectLeft => a.select_to(caret.saturating_sub(1)),
+            AskEdit::SelectRight => a.select_to(caret + 1),
+            AskEdit::SelectWordLeft => {
+                let to = crustagent_core::ask::word_left(&a.text, caret);
+                a.select_to(to);
+            }
+            AskEdit::SelectWordRight => {
+                let to = crustagent_core::ask::word_right(&a.text, caret);
+                a.select_to(to);
+            }
+            AskEdit::SelectHome => a.select_to(0),
+            AskEdit::SelectEnd => a.select_to(len),
+            AskEdit::SelectAll => {
+                a.anchor = Some(0);
+                a.caret = len;
+            }
             AskEdit::Clear => {
-                self.ask_answer.text.clear();
-                self.ask_answer.caret = 0;
+                a.text.clear();
+                a.set_caret(0);
             }
-            AskEdit::Backspace | AskEdit::Delete => {}
         }
     }
 
-    /// Move the caret to a char offset — what a host reports when the field is clicked
-    /// (`crustagent-balloon`'s `ask_caret_at` turns a pixel position into one). Clamped.
+    /// Move the caret to a char offset, clearing any selection — what a host reports when
+    /// the field is clicked (`crustagent-balloon`'s `ask_caret_at` turns a pixel position
+    /// into one). Clamped.
     pub fn report_ask_caret(&mut self, caret: usize) {
         if self.ask_has_input() {
-            self.ask_answer.caret = caret.min(self.ask_answer.text.chars().count());
+            self.ask_answer.set_caret(caret);
+        }
+    }
+    /// Extend the selection to a char offset, keeping its anchor — what a host reports while
+    /// the pointer drags through the field, or on a shifted click.
+    pub fn report_ask_select_to(&mut self, caret: usize) {
+        if self.ask_has_input() {
+            self.ask_answer.select_to(caret);
+        }
+    }
+    /// Select the whole word around a char offset — what a double-click does.
+    pub fn report_ask_select_word(&mut self, at: usize) {
+        if !self.ask_has_input() {
+            return;
+        }
+        let (lo, hi) = crustagent_core::ask::word_at(&self.ask_answer.text, at);
+        self.ask_answer.anchor = Some(lo);
+        self.ask_answer.caret = hi;
+    }
+    /// The selected range of [`ask_text`](Agent::ask_text) as char offsets, if any.
+    pub fn ask_selection(&self) -> Option<(usize, usize)> {
+        self.ask_answer.selection()
+    }
+    /// The selected text — what a host puts on the clipboard for copy or cut. Empty when
+    /// nothing is selected.
+    pub fn ask_selected_text(&self) -> &str {
+        self.ask_answer.selected_text()
+    }
+    /// Delete the selection, if any — the second half of a cut, after the host has taken
+    /// [`ask_selected_text`](Agent::ask_selected_text) for the clipboard.
+    pub fn report_ask_delete_selection(&mut self) {
+        if self.ask_has_input() {
+            self.ask_answer.delete_selection();
         }
     }
 

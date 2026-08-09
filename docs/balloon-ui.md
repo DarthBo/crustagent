@@ -392,10 +392,36 @@ The agent owns the buffer, as it already owned `checked`, and the host reports i
 
 | Host call | Effect |
 | --- | --- |
-| `report_ask_text(&str)` | Insert at the caret. Control characters are stripped — Enter and Tab are the host's to interpret and must never land in the buffer |
-| `report_ask_edit(AskEdit)` | `Backspace` / `Delete` / `Left` / `Right` / `Home` / `End` / `Clear` |
-| `report_ask_caret(usize)` | Place the caret, e.g. from a click (`ask_caret_at` maps a pixel x to an offset) |
+| `report_ask_text(&str)` | Insert at the caret, replacing any selection. Control characters are stripped — Enter and Tab are the host's to interpret and must never land in the buffer. This is also the paste path |
+| `report_ask_edit(AskEdit)` | Movement (`Left`/`Right`/`WordLeft`/`WordRight`/`Home`/`End`), deletion (`Backspace`/`Delete`/`DeleteWordBack`/`Clear`), and selection (`Select*` variants + `SelectAll`) |
+| `report_ask_caret(usize)` | Place the caret and collapse the selection, e.g. from a click (`ask_caret_at` maps a pixel x to an offset) |
+| `report_ask_select_to(usize)` | Extend the selection, keeping its anchor — a drag, or a shifted click |
+| `report_ask_select_word(usize)` | Select the run around an offset — a double-click |
 | `report_ask_submit()` | What Enter does: answers with the field's contents and the set's **first** button, mirroring the search balloon submitting as *Search* |
+
+### 5.2.1 Selection and the clipboard
+
+`AskAnswer.anchor: Option<usize>` is the fixed end of the selection; `caret` is the moving end.
+It is an `Option` rather than "equal to `caret` when nothing is selected" because the latter makes
+`AskAnswer { text, caret: 9, ..Default::default() }` silently select 0..9 — a trap that fired
+immediately in the demo sheet. `AskAnswer::at(text, caret)` and `::selecting(text, anchor, caret)`
+are the constructors; `selection()` normalises whichever way the range was drawn.
+
+Selection semantics follow what every text field does: a bare arrow collapses a selection to the
+edge it points at rather than stepping off the caret; typing or deleting replaces the selection;
+word runs are classified as word-characters / whitespace / punctuation, so a double-click in
+`"hello,  big"` takes `hello`, the comma, both spaces, or `big` depending on where it lands.
+
+**The clipboard is the host's, not the agent's.** `crustagent` never touches a clipboard — copy is
+`ask_selected_text()` for the host to hand to the system, and cut is that plus
+`report_ask_delete_selection()`; paste is just `report_ask_text`. That keeps the whole clipboard
+dependency (`arboard`) inside `crustagent-render`, where the platform integration already lives, and
+leaves an embedder free to route copy/paste wherever it likes.
+
+Rendering: a selected run is drawn as an accent band with the text inverted to white, in three
+measured segments. The caret is **hidden** while a selection is up — the band already says where you
+are — which is asserted by a test that renders with `caret_on` both ways and requires the results to
+be identical.
 
 `Event::Answered` gained `text: Option<String>` — `Some` exactly when the question had a field.
 **This costs `Event` its `Copy`**, which §4.2 previously leaned on; it stays `Clone`, which is all
@@ -434,9 +460,13 @@ Sizing therefore comes from the placeholder and a `INPUT_MIN_CHARS` floor — ne
 
 ### 5.4 Not done
 
-Selection (and so shift-arrows, double-click-to-word, cut/copy/paste of a range), multi-line fields,
-and more than one field per balloon. The reference screenshots show the pre-filled value *selected*
-on open; crustagent places the caret at the end instead.
+Multi-line fields, and more than one field per balloon (which would need real focus *traversal* —
+tab order — rather than the single `AskState.focused` flag). Undo/redo. Vertical scrolling, since
+there is only ever one line.
+
+The reference screenshots show a pre-filled value *selected* on open; crustagent places the caret at
+the end instead. `AskAnswer::selecting` makes the other choice available to an embedder that wants
+it — it just isn't the default.
 
 ---
 

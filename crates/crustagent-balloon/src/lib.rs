@@ -1356,15 +1356,48 @@ impl Canvas<'_> {
 
         let hpad = (INPUT_HPAD * scale).round().max(1.0) as i32;
         let inner = (x + hpad, y + bord, inner_w, h - 2 * bord);
-        self.clipped(inner, |c| match fonts.text {
-            Some(f) => c.text_font(f, text_x, ty, text, color),
-            None => c.text_bitmap(text_x, ty, BSCALE, text, color),
-        });
+        // Everything inside the box is clipped: a scrolled value must be cut at the edge
+        // rather than spill across the balloon.
+        let run_x = |n: usize| {
+            let upto: String = view.value.chars().take(n).collect();
+            text_x + measure_text(fonts.text, &upto)
+        };
 
-        // The caret belongs to focus, not to content: a focused empty field shows one.
-        if state.caret_on && state.focused {
-            let upto: String = view.value.chars().take(view.caret).collect();
-            let caret_x = text_x + measure_text(fonts.text, &upto);
+        match view.selection.filter(|_| !prompting) {
+            // Selected text is drawn in three runs so the middle can be inverted.
+            Some((lo, hi)) => {
+                let (sel_x, sel_end) = (run_x(lo), run_x(hi));
+                let take = |a: usize, b: usize| -> String {
+                    view.value.chars().skip(a).take(b - a).collect()
+                };
+                let (before, selected, after) = (
+                    take(0, lo),
+                    take(lo, hi),
+                    take(hi, view.value.chars().count()),
+                );
+                self.clipped(inner, |c| {
+                    c.fill_rect(sel_x, ty, (sel_end - sel_x).max(1), line_h, paint.accent);
+                    let draw = |c: &mut Self, x: i32, s: &str, rgb: [u8; 3]| match fonts.text {
+                        Some(f) => c.text_font(f, x, ty, s, rgb),
+                        None => c.text_bitmap(x, ty, BSCALE, s, rgb),
+                    };
+                    draw(c, text_x, &before, color);
+                    draw(c, sel_x, &selected, [0xFF, 0xFF, 0xFF]);
+                    draw(c, sel_end, &after, color);
+                });
+            }
+            None => {
+                self.clipped(inner, |c| match fonts.text {
+                    Some(f) => c.text_font(f, text_x, ty, text, color),
+                    None => c.text_bitmap(text_x, ty, BSCALE, text, color),
+                });
+            }
+        }
+
+        // The caret belongs to focus, not to content: a focused empty field shows one. It is
+        // hidden while a selection is up — the highlight already says where you are.
+        if state.caret_on && state.focused && view.selection.is_none() {
+            let caret_x = run_x(view.caret);
             let (top, bottom) = (ty as f32, (ty + line_h) as f32);
             self.clipped(inner, |c| {
                 c.thick_line(
@@ -1797,18 +1830,92 @@ mod tests {
 
     /// A search-style question with a text field, at `text` with the caret at `caret`.
     fn search_layout(text: &str, caret: usize) -> AskLayout {
+        selected_layout(text, caret, caret)
+    }
+
+    /// The same, with `anchor`..`caret` selected.
+    fn selected_layout(text: &str, anchor: usize, caret: usize) -> AskLayout {
         use crustagent_core::ask::{layout_ask, AskAnswer, BalloonUi, ButtonSet};
         layout_ask(
             &BalloonUi::new("What would you like to do?")
                 .input("Type your question here")
                 .buttons(ButtonSet::SearchClose),
-            &AskAnswer {
-                text: text.to_string(),
-                caret,
-                ..Default::default()
+            &if anchor == caret {
+                AskAnswer::at(text, caret)
+            } else {
+                AskAnswer::selecting(text, anchor, caret)
             },
             32,
         )
+    }
+
+    #[test]
+    fn a_selection_paints_a_highlight_and_hides_the_caret() {
+        let fonts = AskFonts::new(None);
+        let focused = AskState {
+            focused: true,
+            ..AskState::default()
+        };
+        let render = |layout: &AskLayout| {
+            let (w, h) = ask_size(&fonts, layout, 2.0);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            paint_ask_into(
+                &mut buf,
+                w,
+                h,
+                layout,
+                false,
+                &BalloonPaint::default(),
+                &fonts,
+                &focused,
+                2.0,
+            );
+            (buf, w, h)
+        };
+
+        let plain = render(&search_layout("hello world", 0));
+        let selected = render(&selected_layout("hello world", 0, 5));
+        assert_ne!(plain.0, selected.0);
+
+        // The highlight is the accent colour, and only a selection puts it in the field.
+        let accent = BalloonPaint::default().accent;
+        let count = |buf: &[u8]| {
+            buf.chunks_exact(4)
+                .filter(|p| p[0] == accent[0] && p[1] == accent[1] && p[2] == accent[2])
+                .count()
+        };
+        assert!(
+            count(&selected.0) > count(&plain.0) + 100,
+            "the selected run should be filled with the accent"
+        );
+
+        // With the caret blinked on but a selection up, no caret is drawn: the two renders
+        // of a selection differ only if the caret leaked through.
+        let blinked_off = {
+            let layout = selected_layout("hello world", 0, 5);
+            let (w, h) = ask_size(&fonts, &layout, 2.0);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            paint_ask_into(
+                &mut buf,
+                w,
+                h,
+                &layout,
+                false,
+                &BalloonPaint::default(),
+                &fonts,
+                &AskState {
+                    focused: true,
+                    caret_on: false,
+                    ..AskState::default()
+                },
+                2.0,
+            );
+            buf
+        };
+        assert_eq!(
+            selected.0, blinked_off,
+            "a selection hides the caret, so the blink must make no difference"
+        );
     }
 
     #[test]
