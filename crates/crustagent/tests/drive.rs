@@ -1115,3 +1115,199 @@ fn the_selection_reaches_the_renderer() {
     assert_eq!(view.selection, Some((0, 5)));
     assert_eq!(view.value, "hello world");
 }
+
+// -- undo / redo ---------------------------------------------------------------------------
+
+/// Type `text` one character at a time, the way a keyboard would.
+fn type_out(agent: &mut Agent, text: &str) {
+    for c in text.chars() {
+        agent.report_ask_text(&c.to_string());
+    }
+}
+
+#[test]
+fn a_typed_run_undoes_as_one_step() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    type_out(&mut agent, "hello");
+    assert_eq!(agent.ask_text(), "hello");
+    assert!(agent.ask_can_undo());
+
+    // Five keystrokes, one undo — not one undo per character.
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+    assert!(!agent.ask_can_undo());
+    assert!(agent.ask_can_redo());
+
+    agent.report_ask_edit(AskEdit::Redo);
+    assert_eq!(agent.ask_text(), "hello");
+    assert_eq!(agent.ask_caret(), 5);
+}
+
+#[test]
+fn deletes_coalesce_but_a_different_kind_starts_a_new_step() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    type_out(&mut agent, "hello");
+    agent.report_ask_edit(AskEdit::Backspace);
+    agent.report_ask_edit(AskEdit::Backspace);
+    assert_eq!(agent.ask_text(), "hel");
+
+    // The two backspaces are one step, and typing before them is another.
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "hello");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+    assert!(!agent.ask_can_undo());
+}
+
+#[test]
+fn a_paste_is_its_own_step() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    type_out(&mut agent, "ab");
+    agent.report_ask_text("PASTED"); // a multi-char insert is a paste
+    type_out(&mut agent, "cd");
+    assert_eq!(agent.ask_text(), "abPASTEDcd");
+
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "abPASTED");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "ab");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+}
+
+#[test]
+fn undo_restores_the_selection_that_was_replaced() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    agent.report_ask_text("hello world");
+    agent.report_ask_caret(0);
+    agent.report_ask_select_to(5);
+    agent.report_ask_text("goodbye");
+    assert_eq!(agent.ask_text(), "goodbye world");
+
+    // Undoing brings back both the text and the selection it was typed over.
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "hello world");
+    assert_eq!(agent.ask_selection(), Some((0, 5)));
+}
+
+#[test]
+fn moving_the_caret_is_not_undoable() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    type_out(&mut agent, "hello");
+    agent.report_ask_edit(AskEdit::Home);
+    agent.report_ask_edit(AskEdit::SelectEnd);
+    agent.report_ask_caret(2);
+    // None of that changed the text, so undo still goes back to empty in one step.
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+    assert!(!agent.ask_can_undo());
+}
+
+#[test]
+fn a_new_edit_abandons_the_redo_branch() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    type_out(&mut agent, "hello");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert!(agent.ask_can_redo());
+
+    type_out(&mut agent, "bye");
+    assert!(!agent.ask_can_redo(), "the old future is gone");
+    agent.report_ask_edit(AskEdit::Redo);
+    assert_eq!(agent.ask_text(), "bye");
+}
+
+#[test]
+fn undo_after_undo_does_not_fold_the_next_edit_into_the_restored_step() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    type_out(&mut agent, "abc");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+    // Typing now must start a fresh step rather than coalescing into the one just undone.
+    type_out(&mut agent, "xy");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+}
+
+#[test]
+fn a_cut_is_undoable() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    agent.report_ask_text("hello world");
+    agent.report_ask_caret(5);
+    agent.report_ask_edit(AskEdit::SelectEnd);
+    agent.report_ask_delete_selection(); // the delete half of a cut
+    assert_eq!(agent.ask_text(), "hello");
+
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "hello world");
+}
+
+#[test]
+fn each_question_starts_with_a_clean_history() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+    type_out(&mut agent, "first");
+    assert!(agent.ask_can_undo());
+
+    agent.dismiss_ask();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+    assert!(
+        !agent.ask_can_undo(),
+        "the previous question's history is gone"
+    );
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+}
+
+#[test]
+fn undo_and_redo_are_ignored_without_a_field() {
+    let mut agent = asking_agent();
+    agent.ask(question()); // choices only
+    run(&mut agent, 100);
+    agent.report_ask_edit(AskEdit::Undo);
+    agent.report_ask_edit(AskEdit::Redo);
+    assert!(!agent.ask_can_undo() && !agent.ask_can_redo());
+}
+
+#[test]
+fn moving_the_caret_ends_the_typing_run() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    // Type, go somewhere else, type again: two edits, so two undo steps.
+    type_out(&mut agent, "world");
+    agent.report_ask_caret(0);
+    type_out(&mut agent, "hello ");
+    assert_eq!(agent.ask_text(), "hello world");
+
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "world", "only the second run is undone");
+    agent.report_ask_edit(AskEdit::Undo);
+    assert_eq!(agent.ask_text(), "");
+}

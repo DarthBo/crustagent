@@ -393,7 +393,7 @@ The agent owns the buffer, as it already owned `checked`, and the host reports i
 | Host call | Effect |
 | --- | --- |
 | `report_ask_text(&str)` | Insert at the caret, replacing any selection. Control characters are stripped — Enter and Tab are the host's to interpret and must never land in the buffer. This is also the paste path |
-| `report_ask_edit(AskEdit)` | Movement (`Left`/`Right`/`WordLeft`/`WordRight`/`Home`/`End`), deletion (`Backspace`/`Delete`/`DeleteWordBack`/`Clear`), and selection (`Select*` variants + `SelectAll`) |
+| `report_ask_edit(AskEdit)` | Movement (`Left`/`Right`/`WordLeft`/`WordRight`/`Home`/`End`), deletion (`Backspace`/`Delete`/`DeleteWordBack`/`Clear`), selection (`Select*` + `SelectAll`), and `Undo`/`Redo` |
 | `report_ask_caret(usize)` | Place the caret and collapse the selection, e.g. from a click (`ask_caret_at` maps a pixel x to an offset) |
 | `report_ask_select_to(usize)` | Extend the selection, keeping its anchor — a drag, or a shifted click |
 | `report_ask_select_word(usize)` | Select the run around an offset — a double-click |
@@ -430,6 +430,30 @@ needs an allocation.
 
 Clicking the field is *not* an answer — `AskHit::Input` places the caret and nothing else.
 
+### 5.2.2 Undo and redo
+
+Snapshot-based: `FieldState { text, caret, anchor }` captured *before* each change that actually
+alters the text. Deliberately just the field — undoing a typed word should not also un-tick a check
+box — and per question, so a fresh question starts with a clean history. Capped at 100 steps.
+
+The interesting part is **what counts as one step**, since a step per keystroke is unusable:
+
+- Consecutive **typing** folds into one step, as do consecutive **deletions**.
+- A change of kind starts a new step — typing after deleting, or vice versa.
+- A **paste**, a **clear**, and **typing over a selection** each stand alone, because they destroy
+  more than a character.
+- **Moving the caret ends the run.** Type, click elsewhere, type again is two steps, not one. This
+  is why `report_ask_caret` / `report_ask_select_to` / `report_ask_select_word` call `break_run`
+  even though they record nothing themselves.
+- An **undo followed by an edit** starts fresh rather than folding into the step just restored, and
+  abandons the redo branch — the usual rule.
+
+Because a snapshot carries the selection, undoing a replacement restores both the old text *and*
+the selection it was typed over, so the next keystroke can replace it again.
+
+`ask_can_undo()` / `ask_can_redo()` are there for a host that wants to grey out a menu item.
+`crustagent-render` binds Cmd/Ctrl+Z, with Shift (or Ctrl+Y) for redo.
+
 ### 5.3 Rendering
 
 The field draws as a white, bordered, rounded box. **Focus is real state**, on
@@ -461,8 +485,8 @@ Sizing therefore comes from the placeholder and a `INPUT_MIN_CHARS` floor — ne
 ### 5.4 Not done
 
 Multi-line fields, and more than one field per balloon (which would need real focus *traversal* —
-tab order — rather than the single `AskState.focused` flag). Undo/redo. Vertical scrolling, since
-there is only ever one line.
+tab order — rather than the single `AskState.focused` flag). Vertical scrolling, since there is only
+ever one line. IME composition (dead keys work, but a pre-edit buffer is not shown inline).
 
 The reference screenshots show a pre-filled value *selected* on open; crustagent places the caret at
 the end instead. `AskAnswer::selecting` makes the other choice available to an embedder that wants

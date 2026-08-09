@@ -421,6 +421,32 @@ impl AskAnswer {
     }
 }
 
+/// A point-in-time state of the text field — what undo and redo restore. Deliberately just
+/// the field: undoing a typed word should not also un-tick a check box.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldState {
+    pub text: String,
+    pub caret: usize,
+    pub anchor: Option<usize>,
+}
+
+impl AskAnswer {
+    /// Capture the field for the undo history.
+    pub fn field_state(&self) -> FieldState {
+        FieldState {
+            text: self.text.clone(),
+            caret: self.caret,
+            anchor: self.anchor,
+        }
+    }
+    /// Restore a captured field state.
+    pub fn restore_field(&mut self, state: FieldState) {
+        self.text = state.text;
+        self.caret = state.caret;
+        self.anchor = state.anchor;
+    }
+}
+
 /// Whether `c` is part of a word, for word-wise movement and double-click selection.
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'

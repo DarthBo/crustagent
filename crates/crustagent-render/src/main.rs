@@ -579,6 +579,13 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::KeyC) if accel => self.copy_field(false),
                     PhysicalKey::Code(KeyCode::KeyX) if accel => self.copy_field(true),
                     PhysicalKey::Code(KeyCode::KeyV) if accel => self.paste_field(),
+                    // Cmd/Ctrl+Z undoes; Shift makes it a redo, as does Ctrl+Y on Windows.
+                    PhysicalKey::Code(KeyCode::KeyZ) if accel => self
+                        .agent
+                        .report_ask_edit(if shift { AskEdit::Redo } else { AskEdit::Undo }),
+                    PhysicalKey::Code(KeyCode::KeyY) if accel => {
+                        self.agent.report_ask_edit(AskEdit::Redo)
+                    }
                     PhysicalKey::Code(KeyCode::Escape) => self.agent.dismiss_ask(),
                     PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
                         self.agent.report_ask_submit()

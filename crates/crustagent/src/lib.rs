@@ -46,7 +46,7 @@ const THINK_PACE_MS: u32 = 300;
 /// depend on `crustagent-core` directly.
 pub use crustagent_core::ask::{
     layout_ask, AskAnswer, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button,
-    ButtonSet, ChoiceStyle, InputView, RowMarker, TextInput, MAX_ITEMS,
+    ButtonSet, ChoiceStyle, FieldState, InputView, RowMarker, TextInput, MAX_ITEMS,
 };
 pub use crustagent_format::{self as format, AcsFile as CharacterFile, Gender, MouthOverlay, Rgba};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent, VoiceRequest};
@@ -133,6 +133,80 @@ pub enum AskEdit {
     SelectAll,
     /// Empty the field.
     Clear,
+    /// Step the field back to before the last change.
+    Undo,
+    /// Step forward again after an [`Undo`](AskEdit::Undo).
+    Redo,
+}
+
+/// How much of the history to keep for one question's field.
+const UNDO_LIMIT: usize = 100;
+
+/// What a change did, so that a run of the same kind folds into one undo step — undoing a
+/// typed word should not take a keystroke at a time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EditKind {
+    /// A typed character.
+    Type,
+    /// A deletion.
+    Delete,
+    /// Anything that stands alone: a paste, a clear, typing over a selection.
+    Discrete,
+}
+
+impl EditKind {
+    /// Whether consecutive edits of this kind fold into a single step.
+    fn coalesces(self) -> bool {
+        matches!(self, EditKind::Type | EditKind::Delete)
+    }
+}
+
+/// Undo history for the active question's text field.
+#[derive(Default)]
+struct FieldHistory {
+    past: Vec<FieldState>,
+    future: Vec<FieldState>,
+    /// The kind of the change on top of `past`, for coalescing.
+    last_kind: Option<EditKind>,
+}
+
+impl FieldHistory {
+    /// Record the state from *before* a change that actually altered the text.
+    fn record(&mut self, before: FieldState, kind: EditKind) {
+        // Any fresh edit abandons the redo branch, as everywhere else.
+        self.future.clear();
+        // A run of the same coalescing kind keeps the step already on the stack, so its
+        // `before` remains the start of the whole run.
+        if self.last_kind == Some(kind) && kind.coalesces() && !self.past.is_empty() {
+            return;
+        }
+        self.past.push(before);
+        if self.past.len() > UNDO_LIMIT {
+            self.past.remove(0);
+        }
+        self.last_kind = Some(kind);
+    }
+
+    /// End the current run, so the next change starts its own undo step. Moving the caret
+    /// does this: typing, clicking elsewhere, then typing again is two edits, not one.
+    fn break_run(&mut self) {
+        self.last_kind = None;
+    }
+
+    fn undo(&mut self, current: FieldState) -> Option<FieldState> {
+        let previous = self.past.pop()?;
+        self.future.push(current);
+        // The next edit starts a fresh step rather than folding into whatever preceded it.
+        self.last_kind = None;
+        Some(previous)
+    }
+
+    fn redo(&mut self, current: FieldState) -> Option<FieldState> {
+        let next = self.future.pop()?;
+        self.past.push(current);
+        self.last_kind = None;
+        Some(next)
+    }
 }
 
 /// A speak vs. think balloon (the tail shape differs).
@@ -373,6 +447,8 @@ pub struct Agent {
     ask: Option<BalloonUi>,
     /// Ticked check boxes and typed text for the active question.
     ask_answer: AskAnswer,
+    /// Undo history for that question's text field.
+    ask_history: FieldHistory,
 
     // sound effects
     audio: Box<dyn AudioSink>,
@@ -427,6 +503,7 @@ impl Agent {
             overlay_think: false,
             ask: None,
             ask_answer: AskAnswer::default(),
+            ask_history: FieldHistory::default(),
             audio: Box::new(NullSink),
             last_track_index: None,
         }
@@ -703,12 +780,22 @@ impl Agent {
         if clean.is_empty() {
             return;
         }
+        // A single typed character folds into the run before it; a paste — or typing over a
+        // selection, which destroys text — is its own undo step.
+        let kind = if clean.chars().count() == 1 && self.ask_answer.selection().is_none() {
+            EditKind::Type
+        } else {
+            EditKind::Discrete
+        };
+        let before = self.ask_answer.field_state();
+
         // Typing over a selection replaces it — including a paste, which is the same path.
         self.ask_answer.delete_selection();
         let at = self.ask_answer.caret_byte();
         self.ask_answer.text.insert_str(at, &clean);
         self.ask_answer
             .set_caret(self.ask_answer.caret_char() + clean.chars().count());
+        self.ask_history.record(before, kind);
     }
 
     /// Apply an editing key to the active question's field.
@@ -716,6 +803,32 @@ impl Agent {
         if !self.ask_has_input() {
             return;
         }
+        // Undo and redo move between recorded states rather than making one.
+        match edit {
+            AskEdit::Undo => {
+                let current = self.ask_answer.field_state();
+                if let Some(previous) = self.ask_history.undo(current) {
+                    self.ask_answer.restore_field(previous);
+                }
+                return;
+            }
+            AskEdit::Redo => {
+                let current = self.ask_answer.field_state();
+                if let Some(next) = self.ask_history.redo(current) {
+                    self.ask_answer.restore_field(next);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let kind = match edit {
+            AskEdit::Backspace | AskEdit::Delete | AskEdit::DeleteWordBack => EditKind::Delete,
+            AskEdit::Clear => EditKind::Discrete,
+            // Movement and selection change no text, so they record nothing (guarded below).
+            _ => EditKind::Discrete,
+        };
+        let before = self.ask_answer.field_state();
         let a = &mut self.ask_answer;
         let caret = a.caret_char();
         let len = a.len_chars();
@@ -783,6 +896,15 @@ impl Agent {
                 a.text.clear();
                 a.set_caret(0);
             }
+            AskEdit::Undo | AskEdit::Redo => unreachable!("handled above"),
+        }
+
+        // Only a real change to the text is worth undoing — but moving the caret still ends
+        // the run, so what is typed next is a step of its own.
+        if self.ask_answer.text != before.text {
+            self.ask_history.record(before, kind);
+        } else {
+            self.ask_history.break_run();
         }
     }
 
@@ -792,6 +914,7 @@ impl Agent {
     pub fn report_ask_caret(&mut self, caret: usize) {
         if self.ask_has_input() {
             self.ask_answer.set_caret(caret);
+            self.ask_history.break_run();
         }
     }
     /// Extend the selection to a char offset, keeping its anchor — what a host reports while
@@ -799,6 +922,7 @@ impl Agent {
     pub fn report_ask_select_to(&mut self, caret: usize) {
         if self.ask_has_input() {
             self.ask_answer.select_to(caret);
+            self.ask_history.break_run();
         }
     }
     /// Select the whole word around a char offset — what a double-click does.
@@ -809,6 +933,7 @@ impl Agent {
         let (lo, hi) = crustagent_core::ask::word_at(&self.ask_answer.text, at);
         self.ask_answer.anchor = Some(lo);
         self.ask_answer.caret = hi;
+        self.ask_history.break_run();
     }
     /// The selected range of [`ask_text`](Agent::ask_text) as char offsets, if any.
     pub fn ask_selection(&self) -> Option<(usize, usize)> {
@@ -822,9 +947,23 @@ impl Agent {
     /// Delete the selection, if any — the second half of a cut, after the host has taken
     /// [`ask_selected_text`](Agent::ask_selected_text) for the clipboard.
     pub fn report_ask_delete_selection(&mut self) {
-        if self.ask_has_input() {
-            self.ask_answer.delete_selection();
+        if !self.ask_has_input() {
+            return;
         }
+        let before = self.ask_answer.field_state();
+        if self.ask_answer.delete_selection() {
+            // A cut stands alone in the history rather than folding into adjacent deletes.
+            self.ask_history.record(before, EditKind::Discrete);
+        }
+    }
+    /// Whether there is anything to [`Undo`](AskEdit::Undo) — for a host that greys out a
+    /// menu item.
+    pub fn ask_can_undo(&self) -> bool {
+        !self.ask_history.past.is_empty()
+    }
+    /// Whether there is anything to [`Redo`](AskEdit::Redo).
+    pub fn ask_can_redo(&self) -> bool {
+        !self.ask_history.future.is_empty()
     }
 
     /// Submit the question from its text field — what Enter does. Answers with the field's
@@ -933,6 +1072,7 @@ impl Agent {
                                        // the queue as soon as there is nothing left to wait for.
         self.ask = None;
         self.ask_answer = AskAnswer::default();
+        self.ask_history = FieldHistory::default();
         if self.balloon_kind.take().is_some() {
             self.balloon_done = false;
             self.balloon_hold_ms = 0;
@@ -1109,6 +1249,7 @@ impl Agent {
         // balloon is also what drops a question.
         self.begin_balloon(BalloonKind::Speak, Vec::new(), Vec::new());
         self.ask_answer = AskAnswer::for_question(&question);
+        self.ask_history = FieldHistory::default();
         self.ask = Some(question);
         self.balloon_done = true;
         self.balloon_hold_ms = u32::MAX; // never auto-hide a question

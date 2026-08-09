@@ -81,8 +81,8 @@ hit-tests with `crustagent-balloon`'s `ask_hit_test` and reports back via `repor
 and the answer arrives as `Event::Answered`. The field (Office's search box, which its API
 never actually exposed) is edited through `report_ask_text` / `report_ask_edit` and submits
 with `report_ask_submit`, with selection (shift-arrows, drag, double-click-to-word) and
-copy/cut/paste — the agent stays clipboard-free, handing the host `ask_selected_text()` and
-taking pasted text back through `report_ask_text`. See [`docs/balloon-ui.md`](docs/balloon-ui.md). Every request
+copy/cut/paste and undo/redo — the agent stays clipboard-free, handing the host
+`ask_selected_text()` and taking pasted text back through `report_ask_text`. See [`docs/balloon-ui.md`](docs/balloon-ui.md). Every request
 returns a `ReqId`, and `drain_events()` yields an `Event` stream (request start/complete,
 show/hide, idle start/end, balloon show/hide, speech start/word/end, `\Mrk` **bookmarks**,
 answers, plus host-reported clicks/drags) so an app can react to what the character is doing. Speech
