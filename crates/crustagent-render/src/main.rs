@@ -12,7 +12,8 @@
 //!
 //! Interaction: **left-drag** moves the character, **right-click** opens a command menu
 //! (left-click an item to run it), **Esc/Q** quits. `--tts` enables real audio speech via
-//! the cross-platform system TTS backend.
+//! the cross-platform system TTS backend. The menu's **Ask** item puts an interactive
+//! balloon up — its choices, check boxes and buttons are clickable in the balloon window.
 
 mod paint;
 mod png;
@@ -21,8 +22,11 @@ mod present;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crustagent::{Agent, BalloonKind, Request};
-use crustagent_balloon::{balloon_size, paint_into, BalloonPaint, Font};
+use crustagent::{Agent, BalloonKind, BalloonUi, ButtonSet, ChoiceStyle, Request};
+use crustagent_balloon::{
+    ask_hit_test, ask_size, balloon_size, paint_ask_into, paint_into, AskFonts, AskState,
+    BalloonPaint, Font,
+};
 use crustagent_format::{act::CelFormat, ActFile, Rgba};
 use present::WgpuPresenter;
 
@@ -49,6 +53,18 @@ fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
         (
             "Think".to_string(),
             Request::Think("Hmm, let me think about that for a moment...".to_string()),
+        ),
+        (
+            "Ask".to_string(),
+            Request::Ask(
+                BalloonUi::new("Select one of these things:")
+                    .heading("What would you like to do?")
+                    .choice("Write a letter")
+                    .choice("Make a chart")
+                    .choice("Nothing, thanks")
+                    .checkbox("Don't ask again")
+                    .buttons(ButtonSet::Cancel),
+            ),
         ),
     ];
     let mut anims = agent.file().gesture_names.clone();
@@ -129,6 +145,7 @@ fn balloon_paint(agent: &Agent, kind: BalloonKind) -> BalloonPaint {
         border: [s.border.0, s.border.1, s.border.2],
         text: [text.0, text.1, text.2],
         think: matches!(kind, BalloonKind::Think),
+        ..BalloonPaint::default()
     }
 }
 
@@ -155,6 +172,11 @@ struct App {
     balloon_scratch: Vec<u8>,
     balloon_dim: (u32, u32),
     balloon_below: bool,
+    /// Cursor position inside the balloon window, for hit-testing interactive balloons.
+    balloon_cursor: (i32, i32),
+    /// Which control the pointer is over / holding down, for hover + pressed feedback. Pure
+    /// presentation state — the agent only hears about a control when it is *committed*.
+    ask_state: AskState,
 
     // command menu (its own scrollable window)
     menu_window: Option<Arc<Window>>,
@@ -173,6 +195,8 @@ struct App {
     // the text is DPI-correct (the balloon buffer is in physical pixels)
     font_spec: FontSpec,
     font: Option<Font>,
+    /// Bold face for an interactive balloon's heading (Office drew `Heading` in bold).
+    font_bold: Option<Font>,
     font_scale: f32,
 
     // graceful shutdown: play Goodbye + Hide before exiting
@@ -336,8 +360,40 @@ impl App {
             return;
         }
         let s = &self.font_spec;
-        self.font = Font::system(&s.family, (s.pt * scale).max(8.0), s.bold, s.italic);
+        let px = (s.pt * scale).max(8.0);
+        self.font = Font::system(&s.family, px, s.bold, s.italic);
+        self.font_bold = Font::system(&s.family, px, true, s.italic);
         self.font_scale = scale;
+    }
+
+    /// Which control of the interactive balloon (if any) the balloon-window cursor is over.
+    fn ask_hit(&self) -> Option<crustagent::AskHit> {
+        let ask = self.agent.balloon()?.ask?;
+        ask_hit_test(
+            &ask,
+            &AskFonts::new(self.font.as_ref()).with_bold(self.font_bold.as_ref()),
+            self.balloon_dim.0,
+            self.balloon_below,
+            self.font_scale,
+            self.balloon_cursor.0,
+            self.balloon_cursor.1,
+        )
+    }
+
+    /// Update hover / pressed state, redrawing the balloon only when it actually changed.
+    fn set_ask_state(
+        &mut self,
+        hover: Option<crustagent::AskHit>,
+        pressed: Option<crustagent::AskHit>,
+    ) {
+        let next = AskState { hover, pressed };
+        if next == self.ask_state {
+            return;
+        }
+        self.ask_state = next;
+        if let Some(win) = &self.balloon_window {
+            win.request_redraw();
+        }
     }
 
     fn compose_balloon(&mut self, w: u32, h: u32) {
@@ -349,16 +405,29 @@ impl App {
         if let Some(bv) = &balloon {
             let style = balloon_paint(&self.agent, bv.kind);
             // The tail is centered on the window, which is sized to fit the balloon.
-            paint_into(
-                &mut self.balloon_scratch,
-                w,
-                h,
-                &bv.layout.lines,
-                below,
-                &style,
-                self.font.as_ref(),
-                self.font_scale,
-            );
+            match &bv.ask {
+                Some(ask) => paint_ask_into(
+                    &mut self.balloon_scratch,
+                    w,
+                    h,
+                    ask,
+                    below,
+                    &style,
+                    &AskFonts::new(self.font.as_ref()).with_bold(self.font_bold.as_ref()),
+                    &self.ask_state,
+                    self.font_scale,
+                ),
+                None => paint_into(
+                    &mut self.balloon_scratch,
+                    w,
+                    h,
+                    &bv.layout.lines,
+                    below,
+                    &style,
+                    self.font.as_ref(),
+                    self.font_scale,
+                ),
+            }
         }
     }
 }
@@ -423,6 +492,10 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 if is_char {
                     self.cursor = (position.x as i32, position.y as i32);
+                } else if is_balloon {
+                    self.balloon_cursor = (position.x as i32, position.y as i32);
+                    let hover = self.ask_hit();
+                    self.set_ask_state(hover, self.ask_state.pressed);
                 } else if is_menu {
                     self.menu_cursor = (position.x as i32, position.y as i32);
                     if let Some(w) = &self.menu_window {
@@ -477,12 +550,37 @@ impl ApplicationHandler for App {
                         }
                         _ => {}
                     }
+                } else if is_balloon && button == MouseButton::Left {
+                    // Arm the control under the pointer — it draws pressed. Committing waits
+                    // for the release, so a press can still be cancelled by dragging off.
+                    let hit = self.ask_hit();
+                    self.set_ask_state(hit, hit);
                 } else if is_menu && button == MouseButton::Left {
                     if let Some(i) = self.menu_hover() {
                         self.agent.request(self.menu_items[i].1.clone());
                     }
                     self.close_menu();
                 }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // The commit: only if the release lands on the control the press armed.
+                // Releasing elsewhere cancels it, leaving the balloon up.
+                if let Some(armed) = self.ask_state.pressed.take() {
+                    if is_balloon && self.ask_hit() == Some(armed) {
+                        self.agent.report_ask_hit(armed);
+                    }
+                    let hover = if is_balloon { self.ask_hit() } else { None };
+                    self.set_ask_state(hover, None);
+                }
+            }
+            // The pointer left the balloon: nothing is hovered any more.
+            WindowEvent::CursorLeft { .. } if is_balloon => {
+                self.balloon_cursor = (-1, -1);
+                self.set_ask_state(None, self.ask_state.pressed);
             }
             WindowEvent::RedrawRequested if is_char => {
                 if let Some(window) = self.char_window.clone() {
@@ -550,14 +648,21 @@ impl ApplicationHandler for App {
             if let Some(scale) = self.char_window.as_ref().map(|w| w.scale_factor() as f32) {
                 self.ensure_font(scale);
             }
-            let (bw, bh) = balloon_size(
-                self.font.as_ref(),
-                &bv.full.lines,
-                bv.full.cols,
-                bv.full.rows,
-                self.font_scale,
-                matches!(bv.kind, BalloonKind::Think),
-            );
+            let (bw, bh) = match &bv.ask {
+                Some(ask) => ask_size(
+                    &AskFonts::new(self.font.as_ref()).with_bold(self.font_bold.as_ref()),
+                    ask,
+                    self.font_scale,
+                ),
+                None => balloon_size(
+                    self.font.as_ref(),
+                    &bv.full.lines,
+                    bv.full.cols,
+                    bv.full.rows,
+                    self.font_scale,
+                    matches!(bv.kind, BalloonKind::Think),
+                ),
+            };
             self.ensure_balloon_window(el, bw, bh);
             self.reposition_balloon();
             if let Some(win) = &self.balloon_window {
@@ -586,10 +691,8 @@ fn main() {
             .unwrap_or_else(|| "balloon.png".into());
         let font = Font::system("", 30.0, false, false); // ~15pt at 2× (retina) scale
         let style = |think| BalloonPaint {
-            bg: [0xFF, 0xFF, 0xE1],
-            border: [0x40, 0x40, 0x40],
-            text: [0x10, 0x10, 0x10],
             think,
+            ..BalloonPaint::default()
         };
         let render = |think: bool, text: &str| -> (Vec<u8>, u32, u32) {
             let lines = vec![text.to_string()];
@@ -630,6 +733,170 @@ fn main() {
         std::fs::write(&out, png::encode_rgba(&buf, w, h)).expect("write png");
         println!(
             "wrote {out} ({w}x{h}, font: {})",
+            if font.is_some() {
+                "system"
+            } else {
+                "8x8 fallback"
+            }
+        );
+        return;
+    }
+
+    // Eyeball an interactive balloon (choices, check boxes, buttons) without a display, and
+    // overlay its hit regions so the click map can be checked against the pixels.
+    if let Some(i) = args.iter().position(|a| a == "--ask-png") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "ask.png".into());
+        // `--hits` tints each clickable region, to check the click map against the pixels.
+        // Off by default, since the tint obscures the thing you're reviewing.
+        let show_hits = args.iter().any(|a| a == "--hits");
+        let font = Font::system("", 30.0, false, false); // ~15pt at 2× (retina) scale
+        let bold = Font::system("", 30.0, true, false);
+        let fonts = AskFonts::new(font.as_ref()).with_bold(bold.as_ref());
+
+        // One of each shape worth eyeballing: the three choice styles, a check-box-only
+        // balloon, a balloon whose tail points up (it sits below the character), and a
+        // choice long enough to wrap.
+        let classic = || {
+            BalloonUi::new("Select one of these things:")
+                .heading("What would you like to do?")
+                .choice("Write a letter")
+                .choice("Make a chart")
+        };
+        let idle = AskState::default();
+        let variants: Vec<(&str, BalloonUi, bool, u8, AskState)> = vec![
+            (
+                "Buttons (default) + check box + OK/Cancel",
+                classic()
+                    .checkbox("Don't ask again")
+                    .buttons(ButtonSet::OkCancel),
+                false,
+                0b1,
+                idle,
+            ),
+            (
+                "Hover: a choice",
+                classic()
+                    .checkbox("Don't ask again")
+                    .buttons(ButtonSet::OkCancel),
+                false,
+                0b1,
+                AskState {
+                    hover: Some(crustagent::AskHit::Choice(1)),
+                    pressed: None,
+                },
+            ),
+            (
+                "Hover: a check box",
+                classic()
+                    .checkbox("Don't ask again")
+                    .buttons(ButtonSet::OkCancel),
+                false,
+                0,
+                AskState {
+                    hover: Some(crustagent::AskHit::CheckBox(0)),
+                    pressed: None,
+                },
+            ),
+            (
+                "Pressed: a commit button (commits on release)",
+                classic()
+                    .checkbox("Don't ask again")
+                    .buttons(ButtonSet::OkCancel),
+                false,
+                0b1,
+                AskState {
+                    hover: Some(crustagent::AskHit::Button(crustagent::Button::Cancel)),
+                    pressed: Some(crustagent::AskHit::Button(crustagent::Button::Cancel)),
+                },
+            ),
+            (
+                "Numbers",
+                classic().style(ChoiceStyle::Numbers).buttons(ButtonSet::Ok),
+                false,
+                0,
+                idle,
+            ),
+            (
+                "Bullets",
+                classic().style(ChoiceStyle::Bullets),
+                false,
+                0,
+                idle,
+            ),
+            (
+                "Check boxes only + Yes/No/Cancel",
+                BalloonUi::new("Which regions?")
+                    .checkbox("North")
+                    .checkbox("South")
+                    .checkbox("East")
+                    .buttons(ButtonSet::YesNoCancel),
+                false,
+                0b101,
+                idle,
+            ),
+            (
+                "Tail below (balloon under the character)",
+                classic().buttons(ButtonSet::Cancel),
+                true,
+                0,
+                idle,
+            ),
+            (
+                "A choice long enough to wrap",
+                BalloonUi::new("Pick one:")
+                    .choice("Write a long and rather rambling letter to the editor")
+                    .choice("Stop"),
+                false,
+                0,
+                idle,
+            ),
+        ];
+
+        let paint = BalloonPaint::default();
+        let mut tiles: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+        for (name, question, below, checked, state) in &variants {
+            let layout = crustagent::layout_ask(question, *checked, 32);
+            let (w, h) = ask_size(&fonts, &layout, 2.0);
+            let mut buf = vec![0x50u8; (w * h * 4) as usize];
+            for px in buf.chunks_exact_mut(4) {
+                px[3] = 0xFF;
+            }
+            paint_ask_into(&mut buf, w, h, &layout, *below, &paint, &fonts, state, 2.0);
+            if show_hits {
+                for rect in crustagent_balloon::ask_rects(&layout, &fonts, w, *below, 2.0) {
+                    for y in rect.y..(rect.y + rect.h).min(h as i32) {
+                        for x in rect.x..(rect.x + rect.w).min(w as i32) {
+                            let o = ((y as u32 * w + x as u32) * 4) as usize;
+                            buf[o] = buf[o].saturating_sub(24); // cool the region slightly
+                        }
+                    }
+                }
+            }
+            println!("  {name} ({w}x{h})");
+            tiles.push((buf, w, h));
+        }
+
+        // Stack the variants into one contact sheet.
+        let gap = 16u32;
+        let w = tiles.iter().map(|t| t.1).max().unwrap_or(1);
+        let h = tiles.iter().map(|t| t.2 + gap).sum::<u32>() + gap;
+        let mut sheet = vec![0x50u8; (w * h * 4) as usize];
+        for px in sheet.chunks_exact_mut(4) {
+            px[3] = 0xFF;
+        }
+        let mut oy = gap;
+        for (buf, tw, th) in &tiles {
+            for y in 0..*th {
+                let d = (((y + oy) * w) * 4) as usize;
+                let s = (y * tw * 4) as usize;
+                sheet[d..d + (tw * 4) as usize].copy_from_slice(&buf[s..s + (tw * 4) as usize]);
+            }
+            oy += th + gap;
+        }
+        std::fs::write(&out, png::encode_rgba(&sheet, w, h)).expect("write png");
+        println!(
+            "wrote {out} ({w}x{h}, {} variants, font: {})",
+            tiles.len(),
             if font.is_some() {
                 "system"
             } else {
@@ -771,6 +1038,8 @@ fn main() {
         balloon_scratch: Vec::new(),
         balloon_dim: (0, 0),
         balloon_below: false,
+        balloon_cursor: (-1, -1),
+        ask_state: AskState::default(),
         menu_window: None,
         menu_presenter: None,
         menu_scratch: Vec::new(),
@@ -783,6 +1052,7 @@ fn main() {
         last: Instant::now(),
         font_spec,
         font: None,
+        font_bold: None,
         font_scale: 0.0,
         quitting: false,
         quit_deadline: None,

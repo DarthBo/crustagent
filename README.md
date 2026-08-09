@@ -74,10 +74,14 @@ has `MOVING*` animations, and **teleports** one that doesn't (vanish → jump �
 `HIDING`/`SHOWING`). Speech is normally serial (`speak`
 drives the character's `SPEAKING` animation + mouth), but **`say_over`/`think_over`** show a
 balloon that reveals *over the current animation* without taking a queue slot — so the
-character can talk while it keeps gesturing. Every request returns
-a `ReqId`, and `drain_events()` yields an `Event` stream (request start/complete, show/hide,
-idle start/end, balloon show/hide, speech start/word/end, `\Mrk` **bookmarks**, plus
-host-reported clicks/drags) so an app can react to what the character is doing. Speech
+character can talk while it keeps gesturing. **`ask`** puts an *interactive* balloon up —
+clickable choices, check boxes and a commit-button row, modeled on the Office Assistant's
+balloon (Microsoft Agent's own was text-only); the host hit-tests with
+`crustagent-balloon`'s `ask_hit_test` and reports back via `report_ask_hit`, and the answer
+arrives as `Event::Answered`. See [`docs/balloon-ui.md`](docs/balloon-ui.md). Every request
+returns a `ReqId`, and `drain_events()` yields an `Event` stream (request start/complete,
+show/hide, idle start/end, balloon show/hide, speech start/word/end, `\Mrk` **bookmarks**,
+answers, plus host-reported clicks/drags) so an app can react to what the character is doing. Speech
 supports **pause/resume**, and the word balloon honors the character's own styling
 (`balloon_style()`: colors, lines × chars, size-to-text, auto-pace, auto-hide) with speak
 (pointed tail) and think (bubble trail) shapes. Sound effects (the character's per-frame
@@ -186,6 +190,9 @@ cargo run -p crustagent-render -- assets/agents/ACT/clippit.act Thinking    # ..
 With no animation named, the character **idles** — escalating `IDLINGLEVEL` animations,
 like the assistant standing around. Name one to loop that gesture instead. **Drag** the
 character with the left mouse button; **right-click** for a command menu; **Esc/Q** quits.
+The menu's **Ask** item raises an *interactive* balloon — clickable choices, check boxes and
+buttons, the way the Office Assistant's balloon worked (see
+[`docs/balloon-ui.md`](docs/balloon-ui.md)).
 
 The window is a borderless, transparent, always-on-top `wgpu` surface (premultiplied
 alpha) so the character floats on the desktop.
@@ -198,7 +205,8 @@ formats and playback rules were reverse-engineered from Microsoft's own runtime 
 sample character files, documented in [`docs/acs-format.md`](docs/acs-format.md) and
 [`docs/act-format.md`](docs/act-format.md), and implemented from those documents. The
 speech-markup parser is implemented from Microsoft's published `Speak()` tag documentation,
-written up in [`docs/speak-markup.md`](docs/speak-markup.md).
+written up in [`docs/speak-markup.md`](docs/speak-markup.md), as are the interactive-balloon
+and command-menu semantics in [`docs/balloon-ui.md`](docs/balloon-ui.md).
 
 crustagent is licensed under either of **MIT** ([`LICENSE-MIT`](LICENSE-MIT)) or
 **Apache-2.0** ([`LICENSE-APACHE`](LICENSE-APACHE)), at your option — so it can be used from

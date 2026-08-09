@@ -13,6 +13,8 @@
 //! - [`idle`] — escalating auto-idle animation selection.
 //! - [`motion`] — directional-state selection + position interpolation for moves.
 //! - [`balloon`] — word-balloon text layout (wrapping).
+//! - [`ask`] — interactive balloon content (choices, check boxes, buttons) laid out into
+//!   tagged rows for a renderer to draw and hit-test.
 //! - [`text`] — parse `Speak`/`Think` markup into display words + a speech directive stream.
 //! - [`rng`] — deterministic, injectable branch randomness.
 //!
@@ -32,6 +34,7 @@
 //! assert_eq!(player.current_frame(), Some(0));
 //! ```
 
+pub mod ask;
 pub mod balloon;
 pub mod character;
 pub mod idle;
@@ -41,6 +44,10 @@ pub mod rng;
 pub mod sequence;
 pub mod text;
 
+pub use ask::{
+    layout_ask, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button, ButtonSet,
+    ChoiceStyle, RowMarker, MAX_ITEMS,
+};
 pub use balloon::{wrap_last_rows, wrap_words, BalloonLayout};
 pub use character::Character;
 pub use idle::IdleDirector;

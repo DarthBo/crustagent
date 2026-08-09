@@ -18,19 +18,35 @@
 //!
 //! [`balloon_size`] computes the pixel size for a given line set (to size a window up front).
 //!
+//! **Interactive balloons** — a question with clickable choices, check boxes and commit
+//! buttons (`crustagent_core::ask`, and `docs/balloon-ui.md` for where the design comes
+//! from) — get their own trio: [`ask_size`], [`paint_ask_into`], and [`ask_hit_test`], which
+//! resolves a click back to the control under it. Give all three the same [`AskFonts`] /
+//! `scale` / `below`, or the hit map won't match the pixels.
+//!
+//! These draw real chrome rather than text stand-ins: a bold heading, choices as
+//! radio-marked links in [`BalloonPaint::accent`], tickable check boxes, and bordered commit
+//! buttons. `AskFonts` carries the bold face for the heading; without one the heading falls
+//! back to the body weight. The no-TrueType path still renders `AskLayout::lines`' ASCII
+//! stand-ins through [`paint_into`].
+//!
+//! [`AskState`] adds hover and pressed feedback. It is host state — see its docs for the
+//! press-arms / release-commits rule that goes with it.
+//!
 //! ```no_run
 //! use crustagent_balloon::{paint_balloon, BalloonPaint, Font};
 //! let font = Font::system("Arial", 30.0, false, false);
 //! let img = paint_balloon(
 //!     &["Hello there!".to_string()],
 //!     0, 1, false,
-//!     &BalloonPaint { bg: [255, 255, 225], border: [0, 0, 0], text: [0, 0, 0], think: false },
+//!     &BalloonPaint { bg: [255, 255, 225], ..BalloonPaint::default() },
 //!     font.as_ref(),
 //!     2.0,
 //! );
 //! // img.rgba is img.width * img.height * 4 bytes, top-down, [r,g,b,a].
 //! ```
 
+use crustagent_core::ask::{AskHit, AskLayout, AskRole, RowMarker};
 use font8x8::legacy::BASIC_LEGACY;
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -299,12 +315,32 @@ pub fn balloon_size(
 }
 
 /// Colors + shape for painting a balloon.
+///
+/// `accent` and `face` only matter for interactive balloons ([`paint_ask_into`]); build one
+/// with `..BalloonPaint::default()` to take their defaults.
 pub struct BalloonPaint {
     pub bg: [u8; 3],
     pub border: [u8; 3],
     pub text: [u8; 3],
+    /// Choice markers and choice text — the Assistant's link blue.
+    pub accent: [u8; 3],
+    /// Commit-button fill.
+    pub face: [u8; 3],
     /// A thought balloon (bubble-trail tail) vs. a speech balloon (pointed tail).
     pub think: bool,
+}
+
+impl Default for BalloonPaint {
+    fn default() -> BalloonPaint {
+        BalloonPaint {
+            bg: [0xFF, 0xFF, 0xE1],
+            border: [0x40, 0x40, 0x40],
+            text: [0x10, 0x10, 0x10],
+            accent: [0x1A, 0x5F, 0xB4],
+            face: [0xF4, 0xF2, 0xE4],
+            think: false,
+        }
+    }
 }
 
 /// A painted balloon: top-down, non-premultiplied RGBA8, `width`×`height`.
@@ -364,6 +400,357 @@ pub fn paint_into(
         h: h as i32,
     }
     .balloon(lines, below, paint, font, scale);
+}
+
+// -- interactive balloons ----------------------------------------------------------------
+
+/// Button chrome, at scale 1.0.
+const BTN_HPAD: f32 = 10.0;
+const BTN_VPAD: f32 = 4.0;
+const BTN_GAP_X: f32 = 8.0;
+/// Space above the commit-button row, and above the first choice / check box — the grouping
+/// that makes a question read as heading, prose, list, actions.
+const GROUP_GAP: f32 = 6.0;
+/// Space below the heading, setting it off from the question that follows.
+const HEADING_GAP: f32 = 7.0;
+/// Breathing room between a row's marker column and its label.
+const MARKER_GAP: f32 = 5.0;
+
+/// The faces an interactive balloon draws with: the body face, and an optional **bold** one
+/// for the heading (Office drew the balloon's `Heading` in bold). With no bold face the
+/// heading falls back to the body face.
+pub struct AskFonts<'a> {
+    pub text: Option<&'a Font>,
+    pub bold: Option<&'a Font>,
+}
+
+impl<'a> AskFonts<'a> {
+    /// Body face only — the heading renders at the same weight.
+    pub fn new(text: Option<&'a Font>) -> AskFonts<'a> {
+        AskFonts { text, bold: None }
+    }
+    /// Add the bold face used for the heading.
+    pub fn with_bold(mut self, bold: Option<&'a Font>) -> AskFonts<'a> {
+        self.bold = bold;
+        self
+    }
+    /// The face a row of this role draws with.
+    fn for_role(&self, role: AskRole) -> Option<&Font> {
+        match role {
+            AskRole::Heading => self.bold.or(self.text),
+            _ => self.text,
+        }
+    }
+    fn line_h(&self) -> i32 {
+        self.text.map(|f| f.line_height()).unwrap_or(8 * BSCALE)
+    }
+}
+
+/// Pixel advance of `s`, matching whichever text path will draw it.
+fn measure_text(font: Option<&Font>, s: &str) -> i32 {
+    match font {
+        Some(f) => f.measure(s),
+        None => s.chars().count() as i32 * 8 * BSCALE,
+    }
+}
+
+/// One row's box, relative to the content origin.
+struct RowMetric {
+    dy: i32,
+    h: i32,
+    /// Where the label starts — past the marker column for a marked row, 0 otherwise.
+    text_dx: i32,
+}
+
+/// Everything the paint and the hit-test must agree on: per-row boxes, the commit buttons'
+/// boxes, the marker column width, and the content size. Computed once, used by both, so a
+/// click can never land somewhere the pixels don't.
+struct AskMetrics {
+    rows: Vec<RowMetric>,
+    /// `(dx, width)` per commit button, left to right.
+    buttons: Vec<(i32, i32)>,
+    marker_w: i32,
+    w: i32,
+    h: i32,
+}
+
+fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
+    let line_h = fonts.line_h();
+    let px = |v: f32| (v * scale).round().max(1.0) as i32;
+    let (btn_hpad, btn_vpad, btn_gap, group_gap) =
+        (px(BTN_HPAD), px(BTN_VPAD), px(BTN_GAP_X), px(GROUP_GAP));
+
+    // The marker column is square-ish, but must also fit the widest list number.
+    let mut marker_w = 0;
+    for row in layout.rows.iter().filter(|r| r.indent > 0) {
+        let need = match row.marker {
+            RowMarker::Number(n) => measure_text(fonts.text, &format!("{n}.")),
+            _ => (line_h as f32 * 0.8) as i32,
+        };
+        marker_w = marker_w.max(need);
+    }
+    // Labels clear the column by a fixed gap, so every row's text starts on one edge.
+    let text_indent = if marker_w > 0 {
+        marker_w + px(MARKER_GAP)
+    } else {
+        0
+    };
+
+    let mut rows = Vec::with_capacity(layout.rows.len());
+    let mut buttons = Vec::new();
+    let (mut y, mut w) = (0, 0);
+    let (mut seen_choice, mut seen_check) = (false, false);
+    let (mut in_heading, mut heading_closed) = (false, false);
+
+    for row in &layout.rows {
+        let mut gap = match row.role {
+            AskRole::Choice(_) if !seen_choice => {
+                seen_choice = true;
+                group_gap
+            }
+            AskRole::CheckBox(_) if !seen_check => {
+                seen_check = true;
+                group_gap
+            }
+            AskRole::Buttons => group_gap,
+            _ => 0,
+        };
+        // The heading gets its own breathing room below it — max'd with any group gap, so a
+        // heading followed straight by the choices doesn't get both.
+        match row.role {
+            AskRole::Heading => in_heading = true,
+            _ if in_heading && !heading_closed => {
+                heading_closed = true;
+                gap = gap.max(px(HEADING_GAP));
+            }
+            _ => {}
+        }
+        y += gap;
+
+        if row.role == AskRole::Buttons {
+            let h = line_h + 2 * btn_vpad;
+            let mut dx = 0;
+            for button in &layout.buttons {
+                let bw = measure_text(fonts.text, button.label()) + 2 * btn_hpad;
+                buttons.push((dx, bw));
+                dx += bw + btn_gap;
+            }
+            w = w.max((dx - btn_gap).max(0));
+            rows.push(RowMetric {
+                dy: y,
+                h,
+                text_dx: 0,
+            });
+            y += h;
+        } else {
+            let text_dx = if row.indent > 0 { text_indent } else { 0 };
+            w = w.max(text_dx + measure_text(fonts.for_role(row.role), &row.text));
+            rows.push(RowMetric {
+                dy: y,
+                h: line_h,
+                text_dx,
+            });
+            y += line_h;
+        }
+    }
+
+    AskMetrics {
+        rows,
+        buttons,
+        marker_w,
+        w: w.max(1),
+        h: y.max(1),
+    }
+}
+
+/// The content origin inside a painted buffer: left edge, and top edge past the tail strip
+/// when the balloon sits below the character.
+fn ask_origin(scale: f32, below: bool) -> (i32, i32) {
+    let pad = pad_px(scale);
+    (pad, if below { tail_px(scale, false) } else { 0 } + pad)
+}
+
+/// How a control is currently being touched by the pointer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Phase {
+    #[default]
+    Idle,
+    /// The pointer is over it.
+    Hover,
+    /// The pointer went down on it and has not been released.
+    Pressed,
+}
+
+/// Which control the pointer is over and which is being held down.
+///
+/// This is pure host-side interaction state — the agent has no business knowing about it, so
+/// the host tracks it (from [`ask_hit_test`] on pointer moves and presses) and hands it to
+/// [`paint_ask_into`]. Note that a control is only *committed* on release, and only if the
+/// release lands on the same control the press did: that's what makes a press cancellable by
+/// dragging off, the way every other button behaves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AskState {
+    pub hover: Option<AskHit>,
+    pub pressed: Option<AskHit>,
+}
+
+impl AskState {
+    /// How `hit` should be drawn. A held control stays [`Phase::Pressed`] only while the
+    /// pointer is still on it; drag off and it falls back to idle, ready to be cancelled.
+    pub fn phase(&self, hit: AskHit) -> Phase {
+        if self.pressed == Some(hit) {
+            return if self.hover == Some(hit) {
+                Phase::Pressed
+            } else {
+                Phase::Idle
+            };
+        }
+        // Another control is held: nothing else lights up until it is released.
+        if self.pressed.is_some() {
+            return Phase::Idle;
+        }
+        if self.hover == Some(hit) {
+            Phase::Hover
+        } else {
+            Phase::Idle
+        }
+    }
+}
+
+/// Blend `a` toward `b` by `t` (0..=1).
+fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2])]
+}
+
+/// One clickable region of an interactive balloon: what a click there means, and where it is
+/// in the painted buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AskRect {
+    /// What to report to the agent when this region is clicked.
+    pub hit: AskHit,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl AskRect {
+    /// Whether `(px, py)` — in the painted buffer's pixel space — is inside this region.
+    pub fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x && py >= self.y && px < self.x + self.w && py < self.y + self.h
+    }
+}
+
+/// The clickable regions of an interactive balloon painted at width `w` with `scale`/`fonts`
+/// (the same arguments given to [`paint_ask_into`], or the region map won't match the
+/// pixels). A choice that wrapped over several rows yields one region spanning them all;
+/// the commit-button row yields one region per button, each hugging its drawn box.
+pub fn ask_rects(
+    layout: &AskLayout,
+    fonts: &AskFonts,
+    w: u32,
+    below: bool,
+    scale: f32,
+) -> Vec<AskRect> {
+    let m = ask_metrics(layout, fonts, scale);
+    let (x0, y0) = ask_origin(scale, below);
+    let row_w = (w as i32 - 2 * x0).max(1);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < layout.rows.len() {
+        let role = layout.rows[i].role;
+        // Consecutive rows sharing a role are one control (a wrapped choice, say).
+        let mut j = i + 1;
+        while j < layout.rows.len() && layout.rows[j].role == role {
+            j += 1;
+        }
+        let y = y0 + m.rows[i].dy;
+        let h = m.rows[j - 1].dy + m.rows[j - 1].h - m.rows[i].dy;
+        match role {
+            AskRole::Choice(n) => out.push(AskRect {
+                hit: AskHit::Choice(n),
+                x: x0,
+                y,
+                w: row_w,
+                h,
+            }),
+            AskRole::CheckBox(n) => out.push(AskRect {
+                hit: AskHit::CheckBox(n),
+                x: x0,
+                y,
+                w: row_w,
+                h,
+            }),
+            AskRole::Buttons => {
+                for (button, &(dx, bw)) in layout.buttons.iter().zip(&m.buttons) {
+                    out.push(AskRect {
+                        hit: AskHit::Button(*button),
+                        x: x0 + dx,
+                        y,
+                        w: bw,
+                        h,
+                    });
+                }
+            }
+            AskRole::Heading | AskRole::Text => {}
+        }
+        i = j;
+    }
+    out
+}
+
+/// Which control — if any — a click at `(px, py)` in the painted buffer landed on. Feed the
+/// result to `Agent::report_ask_hit`.
+#[allow(clippy::too_many_arguments)]
+pub fn ask_hit_test(
+    layout: &AskLayout,
+    fonts: &AskFonts,
+    w: u32,
+    below: bool,
+    scale: f32,
+    px: i32,
+    py: i32,
+) -> Option<AskHit> {
+    ask_rects(layout, fonts, w, below, scale)
+        .into_iter()
+        .find(|r| r.contains(px, py))
+        .map(|r| r.hit)
+}
+
+/// The pixel size needed to hold an interactive balloon (a question never uses the thought
+/// tail, so this always reserves the speech one).
+pub fn ask_size(fonts: &AskFonts, layout: &AskLayout, scale: f32) -> (u32, u32) {
+    let m = ask_metrics(layout, fonts, scale);
+    let pad = pad_px(scale);
+    let w = m.w + pad * 2 + 2;
+    let h = m.h + pad * 2 + tail_px(scale, false) + 2;
+    (w.max(16) as u32, h.max(16) as u32)
+}
+
+/// Paint an interactive balloon into a caller-provided buffer of size `w`×`h` (size it with
+/// [`ask_size`]). Pass the same `fonts`, `scale` and `below` to [`ask_hit_test`] so clicks
+/// resolve against the pixels actually drawn. `state` carries hover / pressed feedback —
+/// pass `&AskState::default()` for none.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_ask_into(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    layout: &AskLayout,
+    below: bool,
+    paint: &BalloonPaint,
+    fonts: &AskFonts,
+    state: &AskState,
+    scale: f32,
+) {
+    Canvas {
+        buf,
+        w: w as i32,
+        h: h as i32,
+    }
+    .ask(layout, below, paint, fonts, state, scale);
 }
 
 /// A borrowed RGBA8 drawing target (top-down, non-premultiplied).
@@ -592,8 +979,267 @@ impl Canvas<'_> {
         font: Option<&Font>,
         scale: f32,
     ) {
-        let (bg, border, text) = (style.bg, style.border, style.text);
+        self.body(below, style, scale);
         let pad = pad_px(scale);
+        let y0 = if below {
+            tail_px(scale, style.think)
+        } else {
+            0
+        } + pad;
+        let line_h = font.map(|f| f.line_height()).unwrap_or(8 * BSCALE);
+        for (i, line) in lines.iter().enumerate() {
+            let ty = y0 + i as i32 * line_h;
+            match font {
+                Some(f) => self.text_font(f, pad, ty, line, style.text),
+                None => self.text_bitmap(pad, ty, BSCALE, line, style.text),
+            }
+        }
+    }
+
+    /// Draw an interactive balloon: the body, then each row — a bold heading, prose, choices
+    /// drawn as marked links, tickable check boxes, and real commit buttons.
+    #[allow(clippy::too_many_arguments)]
+    fn ask(
+        &mut self,
+        layout: &AskLayout,
+        below: bool,
+        style: &BalloonPaint,
+        fonts: &AskFonts,
+        state: &AskState,
+        scale: f32,
+    ) {
+        self.body(below, style, scale);
+        let m = ask_metrics(layout, fonts, scale);
+        let (x0, y0) = ask_origin(scale, below);
+        let line_h = fonts.line_h();
+        let rects = ask_rects(layout, fonts, self.w as u32, below, scale);
+
+        // Row highlights go down first, under everything else. Buttons are skipped: they
+        // carry their state in their own face rather than a band behind them.
+        for rect in &rects {
+            if matches!(rect.hit, AskHit::Button(_)) {
+                continue;
+            }
+            let tint = match state.phase(rect.hit) {
+                Phase::Pressed => 0.22,
+                Phase::Hover => 0.11,
+                Phase::Idle => continue,
+            };
+            let r = (scale * 3.0).round() as i32;
+            self.fill_round_rect(
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                r,
+                mix(style.bg, style.accent, tint),
+            );
+        }
+
+        for (i, row) in layout.rows.iter().enumerate() {
+            let metric = &m.rows[i];
+            let y = y0 + metric.dy;
+
+            if row.role == AskRole::Buttons {
+                for (button, &(dx, bw)) in layout.buttons.iter().zip(&m.buttons) {
+                    let phase = state.phase(AskHit::Button(*button));
+                    self.button(
+                        x0 + dx,
+                        y,
+                        bw,
+                        metric.h,
+                        button.label(),
+                        style,
+                        fonts,
+                        phase,
+                        scale,
+                    );
+                }
+                continue;
+            }
+
+            // The marker sits in its own column, centred on the row's text line.
+            self.marker(x0, y, m.marker_w, line_h, row.marker, style, fonts, scale);
+
+            let color = match row.role {
+                // Choices read as links, the way the Assistant's did.
+                AskRole::Choice(_) => style.accent,
+                _ => style.text,
+            };
+            let tx = x0 + metric.text_dx;
+            match fonts.for_role(row.role) {
+                Some(f) => self.text_font(f, tx, y, &row.text, color),
+                None => self.text_bitmap(tx, y, BSCALE, &row.text, color),
+            }
+
+            // Under a pointer, a choice underlines like the link it reads as.
+            if let AskRole::Choice(n) = row.role {
+                if state.phase(AskHit::Choice(n)) != Phase::Idle && !row.text.is_empty() {
+                    let tw = measure_text(fonts.for_role(row.role), &row.text);
+                    let uy = y + (line_h as f32 * 0.86) as i32;
+                    let half = (scale * 0.5).max(0.5);
+                    self.thick_line(
+                        tx as f32,
+                        uy as f32,
+                        (tx + tw) as f32,
+                        uy as f32,
+                        half,
+                        color,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Draw a row's marker centred in a `w`×`h` column at (`x`, `y`): a radio-style disc for
+    /// a clickable choice, a dot for a bulleted one, the number for a numbered one, or a
+    /// tickable box for a check box.
+    #[allow(clippy::too_many_arguments)]
+    fn marker(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        marker: RowMarker,
+        paint: &BalloonPaint,
+        fonts: &AskFonts,
+        scale: f32,
+    ) {
+        if marker == RowMarker::None || w <= 0 {
+            return;
+        }
+        let (cx, cy) = (x + w / 2, y + h / 2);
+        let bord = scale.round().max(1.0) as i32;
+        // A darker rim of the accent, so the disc reads as a control rather than a blob.
+        let rim = [
+            (paint.accent[0] as u32 * 7 / 10) as u8,
+            (paint.accent[1] as u32 * 7 / 10) as u8,
+            (paint.accent[2] as u32 * 7 / 10) as u8,
+        ];
+
+        match marker {
+            RowMarker::None => {}
+            RowMarker::Choice => {
+                let r = ((h as f32) * 0.26).round().max(3.0) as i32;
+                self.disc(cx, cy, r, bord, paint.accent, rim);
+                // The bright centre is what makes it read as a radio dot.
+                let inner = ((r as f32) * 0.32).round().max(1.0) as i32;
+                self.disc(cx, cy, inner, 0, [0xFF, 0xFF, 0xFF], [0xFF, 0xFF, 0xFF]);
+            }
+            RowMarker::Bullet => {
+                let r = ((h as f32) * 0.13).round().max(2.0) as i32;
+                self.disc(cx, cy, r, 0, paint.text, paint.text);
+            }
+            RowMarker::Number(n) => {
+                let label = format!("{n}.");
+                // Right-aligned in the column, so the labels line up whatever the digits.
+                let tw = measure_text(fonts.text, &label);
+                let tx = x + (w - tw).max(0);
+                match fonts.text {
+                    Some(f) => self.text_font(f, tx, y, &label, paint.text),
+                    None => self.text_bitmap(tx, y, BSCALE, &label, paint.text),
+                }
+            }
+            RowMarker::CheckBox(checked) => {
+                let s = ((h as f32) * 0.58).round().max(7.0) as i32;
+                let (bx, by) = (cx - s / 2, cy - s / 2);
+                let r = (scale * 2.0).round() as i32;
+                self.fill_round_rect(bx, by, s, s, r, paint.border);
+                self.fill_round_rect(
+                    bx + bord,
+                    by + bord,
+                    s - 2 * bord,
+                    s - 2 * bord,
+                    (r - bord).max(0),
+                    [0xFF, 0xFF, 0xFF],
+                );
+                if checked {
+                    // A two-stroke tick, inset so it sits inside the box's border.
+                    let f =
+                        |dx: f32, dy: f32| (bx as f32 + s as f32 * dx, by as f32 + s as f32 * dy);
+                    let half = (scale * 1.1).max(1.0);
+                    let (ax, ay) = f(0.24, 0.52);
+                    let (mx, my) = f(0.43, 0.71);
+                    let (zx, zy) = f(0.77, 0.29);
+                    self.thick_line(ax, ay, mx, my, half, paint.accent);
+                    self.thick_line(mx, my, zx, zy, half, paint.accent);
+                }
+            }
+        }
+    }
+
+    /// Draw a commit button: a rounded, bordered face with its label centred. Hovering
+    /// lightens the face and accents the border; holding it down darkens the face and nudges
+    /// the label a pixel down-right, so the button visibly takes the press.
+    #[allow(clippy::too_many_arguments)]
+    fn button(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        label: &str,
+        paint: &BalloonPaint,
+        fonts: &AskFonts,
+        phase: Phase,
+        scale: f32,
+    ) {
+        let bord = scale.round().max(1.0) as i32;
+        let r = (scale * 4.0).round().max(2.0) as i32;
+        let (face, border, nudge) = match phase {
+            Phase::Idle => (paint.face, paint.border, 0),
+            Phase::Hover => (mix(paint.face, [0xFF, 0xFF, 0xFF], 0.55), paint.accent, 0),
+            Phase::Pressed => (mix(paint.face, paint.border, 0.20), paint.accent, bord),
+        };
+        self.fill_round_rect(x, y, w, h, r, border);
+        self.fill_round_rect(
+            x + bord,
+            y + bord,
+            w - 2 * bord,
+            h - 2 * bord,
+            (r - bord).max(0),
+            face,
+        );
+        let tw = measure_text(fonts.text, label);
+        let line_h = fonts.line_h();
+        let (tx, ty) = (x + (w - tw) / 2 + nudge, y + (h - line_h) / 2 + nudge);
+        match fonts.text {
+            Some(f) => self.text_font(f, tx, ty, label, paint.text),
+            None => self.text_bitmap(tx, ty, BSCALE, label, paint.text),
+        }
+    }
+
+    /// An antialiased line of half-width `half` from (`x0`, `y0`) to (`x1`, `y1`), drawn as
+    /// the coverage of a distance field so the ends and slopes stay clean at any scale.
+    fn thick_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, half: f32, rgb: [u8; 3]) {
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let len_sq = dx * dx + dy * dy;
+        let pad = half.ceil() as i32 + 1;
+        let (lo_x, hi_x) = (x0.min(x1) as i32 - pad, x0.max(x1) as i32 + pad);
+        let (lo_y, hi_y) = (y0.min(y1) as i32 - pad, y0.max(y1) as i32 + pad);
+        for py in lo_y..=hi_y {
+            for px in lo_x..=hi_x {
+                let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                // Distance to the segment: project onto it, clamped to the endpoints.
+                let t = if len_sq > 0.0 {
+                    (((fx - x0) * dx + (fy - y0) * dy) / len_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let dist = (fx - (x0 + t * dx)).hypot(fy - (y0 + t * dy));
+                let cov = (0.5 - (dist - half)).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.cover(px, py, rgb, cov);
+                }
+            }
+        }
+    }
+
+    /// Draw the balloon shape itself — rounded body plus the speech tail or thought-bubble
+    /// trail — filling this (already correctly-sized) canvas. Text is the caller's job.
+    fn body(&mut self, below: bool, style: &BalloonPaint, scale: f32) {
+        let (bg, border) = (style.bg, style.border);
         let tail_len = tail_px(scale, style.think);
         let tail_half = (6.0 * scale).round().max(3.0) as i32;
 
@@ -658,15 +1304,6 @@ impl Canvas<'_> {
                 }
             }
         }
-
-        let line_h = font.map(|f| f.line_height()).unwrap_or(8 * BSCALE);
-        for (i, line) in lines.iter().enumerate() {
-            let ty = by + pad + i as i32 * line_h;
-            match font {
-                Some(f) => self.text_font(f, bx + pad, ty, line, text),
-                None => self.text_bitmap(bx + pad, ty, BSCALE, line, text),
-            }
-        }
     }
 }
 
@@ -682,12 +1319,7 @@ mod tests {
             0,
             1,
             false,
-            &BalloonPaint {
-                bg: [255, 255, 225],
-                border: [0, 0, 0],
-                text: [0, 0, 0],
-                think: false,
-            },
+            &BalloonPaint::default(),
             None,
             2.0,
         );
@@ -705,12 +1337,7 @@ mod tests {
             4,
             1,
             false,
-            &BalloonPaint {
-                bg: [255, 255, 225],
-                border: [0, 0, 0],
-                text: [0, 0, 0],
-                think: false,
-            },
+            &BalloonPaint::default(),
             None,
             2.0,
         );
@@ -725,6 +1352,252 @@ mod tests {
             partial > 0,
             "shape edges should be antialiased (have partial-alpha pixels)"
         );
+    }
+
+    /// The demo question: a heading, body text, two choices, a check box and a button row.
+    fn ask_layout() -> AskLayout {
+        use crustagent_core::ask::{layout_ask, BalloonUi, ButtonSet};
+        layout_ask(
+            &BalloonUi::new("Select one of these things:")
+                .heading("What would you like to do?")
+                .choice("Write a letter")
+                .choice("Make a chart")
+                .checkbox("Don't ask again")
+                .buttons(ButtonSet::OkCancel),
+            0,
+            32,
+        )
+    }
+
+    #[test]
+    fn every_control_is_hittable_at_its_own_row() {
+        let layout = ask_layout();
+        let (w, _h) = ask_size(&AskFonts::new(None), &layout, 2.0);
+        let rects = ask_rects(&layout, &AskFonts::new(None), w, false, 2.0);
+        // Two choices, one check box, two buttons.
+        assert_eq!(rects.len(), 5, "{rects:?}");
+        for rect in &rects {
+            let (cx, cy) = (rect.x + rect.w / 2, rect.y + rect.h / 2);
+            assert_eq!(
+                ask_hit_test(&layout, &AskFonts::new(None), w, false, 2.0, cx, cy),
+                Some(rect.hit),
+                "center of {rect:?} should hit itself"
+            );
+        }
+    }
+
+    #[test]
+    fn heading_and_body_rows_are_not_clickable() {
+        let layout = ask_layout();
+        let fonts = AskFonts::new(None);
+        let (w, _h) = ask_size(&fonts, &layout, 2.0);
+        let m = ask_metrics(&layout, &fonts, 2.0);
+        let (x0, y0) = ask_origin(2.0, false);
+        // Rows 0 and 1 are the heading and the body text.
+        for row in 0..2 {
+            let y = y0 + m.rows[row].dy + m.rows[row].h / 2;
+            assert_eq!(
+                ask_hit_test(&layout, &fonts, w, false, 2.0, x0 + 4, y),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn buttons_get_side_by_side_regions_in_order() {
+        use crustagent_core::ask::Button;
+        let layout = ask_layout();
+        let (w, _h) = ask_size(&AskFonts::new(None), &layout, 2.0);
+        let buttons: Vec<AskRect> = ask_rects(&layout, &AskFonts::new(None), w, false, 2.0)
+            .into_iter()
+            .filter(|r| matches!(r.hit, AskHit::Button(_)))
+            .collect();
+        assert_eq!(buttons[0].hit, AskHit::Button(Button::Ok));
+        assert_eq!(buttons[1].hit, AskHit::Button(Button::Cancel));
+        assert_eq!(buttons[0].y, buttons[1].y, "same row");
+        assert!(
+            buttons[1].x >= buttons[0].x + buttons[0].w,
+            "Cancel sits right of OK without overlapping: {buttons:?}"
+        );
+
+        // Same again through the real-font measuring path, which is what actually ships
+        // (skipped where the sandbox has no installed fonts).
+        let Some(font) = Font::system("", 24.0, false, false) else {
+            return;
+        };
+        let (fw, _) = ask_size(&AskFonts::new(Some(&font)), &layout, 2.0);
+        let real: Vec<AskRect> = ask_rects(&layout, &AskFonts::new(Some(&font)), fw, false, 2.0)
+            .into_iter()
+            .filter(|r| matches!(r.hit, AskHit::Button(_)))
+            .collect();
+        assert!(
+            real[1].x >= real[0].x + real[0].w,
+            "buttons must not overlap with a real font either: {real:?}"
+        );
+        for rect in &real {
+            let (cx, cy) = (rect.x + rect.w / 2, rect.y + rect.h / 2);
+            assert_eq!(
+                ask_hit_test(&layout, &AskFonts::new(Some(&font)), fw, false, 2.0, cx, cy),
+                Some(rect.hit)
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_choice_is_one_region_spanning_its_rows() {
+        use crustagent_core::ask::{layout_ask, BalloonUi};
+        // Narrow enough that the choice wraps over several rows.
+        let layout = layout_ask(
+            &BalloonUi::new("").choice("one two three four five six"),
+            0,
+            10,
+        );
+        assert!(layout.rows.len() > 1);
+        let fonts = AskFonts::new(None);
+        let rects = ask_rects(&layout, &fonts, 200, false, 2.0);
+        assert_eq!(rects.len(), 1, "one control, not one per row: {rects:?}");
+        let m = ask_metrics(&layout, &fonts, 2.0);
+        let last = m.rows.last().unwrap();
+        assert_eq!(rects[0].h, last.dy + last.h - m.rows[0].dy);
+    }
+
+    #[test]
+    fn a_below_balloon_shifts_its_regions_past_the_tail() {
+        let layout = ask_layout();
+        let (w, _h) = ask_size(&AskFonts::new(None), &layout, 2.0);
+        let above = ask_rects(&layout, &AskFonts::new(None), w, false, 2.0);
+        let below = ask_rects(&layout, &AskFonts::new(None), w, true, 2.0);
+        assert!(
+            below[0].y > above[0].y,
+            "the tail strip is on top when the balloon sits below the character"
+        );
+    }
+
+    #[test]
+    fn marked_rows_reserve_a_marker_column_and_plain_rows_do_not() {
+        let layout = ask_layout();
+        let m = ask_metrics(&layout, &AskFonts::new(None), 2.0);
+        assert!(m.marker_w > 0);
+        for (row, metric) in layout.rows.iter().zip(&m.rows) {
+            match row.role {
+                AskRole::Choice(_) | AskRole::CheckBox(_) => assert!(
+                    metric.text_dx > m.marker_w,
+                    "{:?} must clear the marker column",
+                    row.role
+                ),
+                AskRole::Heading | AskRole::Text | AskRole::Buttons => {
+                    assert_eq!(metric.text_dx, 0, "{:?} is not marked", row.role)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bold_heading_is_measured_at_its_own_weight() {
+        // The heading is the widest row here, so the bold face has to widen the balloon —
+        // proof the heading is measured (and so drawn) with it. Skipped without fonts.
+        let (Some(text), Some(bold)) = (
+            Font::system("", 24.0, false, false),
+            Font::system("", 24.0, true, false),
+        ) else {
+            return;
+        };
+        let layout = ask_layout();
+        let plain = ask_size(&AskFonts::new(Some(&text)), &layout, 2.0);
+        let heavy = ask_size(
+            &AskFonts::new(Some(&text)).with_bold(Some(&bold)),
+            &layout,
+            2.0,
+        );
+        assert!(
+            heavy.0 >= plain.0,
+            "bold heading should not shrink the balloon: {heavy:?} vs {plain:?}"
+        );
+        assert_eq!(heavy.1, plain.1, "weight must not change row heights");
+    }
+
+    #[test]
+    fn a_held_control_reads_pressed_only_while_the_pointer_stays_on_it() {
+        let a = AskHit::Choice(0);
+        let b = AskHit::Choice(1);
+
+        let idle = AskState::default();
+        assert_eq!(idle.phase(a), Phase::Idle);
+
+        let hovering = AskState {
+            hover: Some(a),
+            pressed: None,
+        };
+        assert_eq!(hovering.phase(a), Phase::Hover);
+        assert_eq!(hovering.phase(b), Phase::Idle);
+
+        let holding = AskState {
+            hover: Some(a),
+            pressed: Some(a),
+        };
+        assert_eq!(holding.phase(a), Phase::Pressed);
+
+        // Dragged off while still held: the control releases visually, so letting go there
+        // reads as the cancel it is. Nothing else lights up while a press is in flight.
+        let dragged_off = AskState {
+            hover: Some(b),
+            pressed: Some(a),
+        };
+        assert_eq!(dragged_off.phase(a), Phase::Idle);
+        assert_eq!(dragged_off.phase(b), Phase::Idle);
+    }
+
+    #[test]
+    fn interaction_state_does_not_move_anything() {
+        // Feedback is paint-only: hover and press must not shift the layout under the
+        // pointer, or a control could slide out from under the click committing it.
+        let layout = ask_layout();
+        let fonts = AskFonts::new(None);
+        let (w, h) = ask_size(&fonts, &layout, 2.0);
+        let rects = ask_rects(&layout, &fonts, w, false, 2.0);
+
+        let render = |state: &AskState| {
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            paint_ask_into(
+                &mut buf,
+                w,
+                h,
+                &layout,
+                false,
+                &BalloonPaint::default(),
+                &fonts,
+                state,
+                2.0,
+            );
+            buf
+        };
+        let idle = render(&AskState::default());
+        let hovered = render(&AskState {
+            hover: Some(rects[0].hit),
+            pressed: None,
+        });
+        assert_ne!(idle, hovered, "hover should be visible at all");
+        // ...and the region map is identical either way.
+        assert_eq!(rects, ask_rects(&layout, &fonts, w, false, 2.0));
+    }
+
+    #[test]
+    fn paints_an_interactive_balloon() {
+        let layout = ask_layout();
+        let (w, h) = ask_size(&AskFonts::new(None), &layout, 2.0);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        paint_ask_into(
+            &mut buf,
+            w,
+            h,
+            &layout,
+            false,
+            &BalloonPaint::default(),
+            &AskFonts::new(None),
+            &AskState::default(),
+            2.0,
+        );
+        assert!(buf.iter().skip(3).step_by(4).any(|&a| a == 0xFF));
     }
 
     #[test]

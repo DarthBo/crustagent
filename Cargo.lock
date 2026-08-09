@@ -521,6 +521,7 @@ dependencies = [
 name = "crustagent-balloon"
 version = "1.1.0"
 dependencies = [
+ "crustagent-core",
  "font8x8",
  "fontdb",
  "fontdue",

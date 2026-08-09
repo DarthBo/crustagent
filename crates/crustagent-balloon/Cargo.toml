@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+crustagent-core = { path = "../crustagent-core" }
 fontdue = "0.9.3"
 swash = "0.2"
 fontdb = "0.23.0"

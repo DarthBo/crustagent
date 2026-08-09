@@ -42,6 +42,12 @@ const AUTO_HIDE_MS: u32 = 3000;
 /// Per-word reveal pacing for a silent `Think` balloon (ms).
 const THINK_PACE_MS: u32 = 300;
 
+/// The interactive-balloon vocabulary (see [`Agent::ask`]), re-exported so hosts need not
+/// depend on `crustagent-core` directly.
+pub use crustagent_core::ask::{
+    layout_ask, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button, ButtonSet,
+    ChoiceStyle, MAX_ITEMS,
+};
 pub use crustagent_format::{self as format, AcsFile as CharacterFile, Gender, MouthOverlay, Rgba};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent, VoiceRequest};
 
@@ -63,6 +69,9 @@ pub enum Request {
     Speak(String),
     /// Think: show a thought balloon (no audio), pacing the words silently.
     Think(String),
+    /// Ask: show a balloon carrying clickable choices / check boxes / buttons, and wait for
+    /// the answer (see [`Agent::ask`]). Answers arrive as [`Event::Answered`].
+    Ask(BalloonUi),
     /// Walk to a screen point at `speed` pixels/second.
     MoveTo { x: i32, y: i32, speed: u32 },
     /// Point toward a screen point.
@@ -117,6 +126,16 @@ pub enum Event {
     BalloonShown,
     /// A balloon disappeared.
     BalloonHidden,
+    /// The user answered a [`Request::Ask`] question. `choice` is the 1-based index of the
+    /// clicked choice (as the Office Assistant's `Show` returned), `button` the clicked
+    /// commit button, and `checked` a bitmask of the ticked check boxes (bit *n* = check box
+    /// *n*). Exactly one of `choice` / `button` is set. A question dismissed without an
+    /// answer (see [`Agent::dismiss_ask`]) raises no `Answered` at all.
+    Answered {
+        choice: Option<u8>,
+        button: Option<Button>,
+        checked: u8,
+    },
     /// Speech (audio + reveal) began.
     SpeechStarted,
     /// Speech finished.
@@ -171,6 +190,11 @@ pub struct BalloonView {
     pub shown_words: usize,
     /// Speak or think (chooses the tail shape).
     pub kind: BalloonKind,
+    /// Set when this balloon is an interactive question: the rows to draw, each tagged with
+    /// what it is, so the renderer can frame the choices and hit-test clicks. `layout.lines`
+    /// holds the same rows as plain text, so a host that draws no chrome still shows the
+    /// question. Feed hits back with [`Agent::report_ask_hit`].
+    pub ask: Option<AskLayout>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -185,6 +209,8 @@ enum Activity {
     Move,
     Speak,
     Think,
+    /// Holding a modal question, waiting for the user to answer.
+    Ask,
     Wait,
 }
 
@@ -295,6 +321,11 @@ pub struct Agent {
     /// Whether the active overlay balloon is a silent think (vs a spoken say).
     overlay_think: bool,
 
+    // interactive question (a balloon with clickable choices / check boxes / buttons)
+    ask: Option<BalloonUi>,
+    /// Bitmask of ticked check boxes in the active question.
+    ask_checked: u8,
+
     // sound effects
     audio: Box<dyn AudioSink>,
     last_track_index: Option<usize>,
@@ -346,6 +377,8 @@ impl Agent {
             balloon_hold_ms: 0,
             speaking_overlay: false,
             overlay_think: false,
+            ask: None,
+            ask_checked: 0,
             audio: Box::new(NullSink),
             last_track_index: None,
         }
@@ -440,7 +473,17 @@ impl Agent {
     }
 
     /// Report a click on the character (raised back as [`Event::Clicked`]).
+    ///
+    /// An [`AutoDown`](BalloonMode::AutoDown) question is dismissed by this, unanswered —
+    /// that mode means "goes away when the user clicks anywhere".
     pub fn report_click(&mut self, button: MouseButton, x: i32, y: i32) {
+        if self
+            .ask
+            .as_ref()
+            .is_some_and(|q| q.mode == BalloonMode::AutoDown)
+        {
+            self.dismiss_ask();
+        }
         self.emit(Event::Clicked { button, x, y });
     }
     /// Report a double-click on the character.
@@ -554,6 +597,72 @@ impl Agent {
     pub fn think(&mut self, text: impl Into<String>) -> ReqId {
         self.request(Request::Think(text.into()))
     }
+    /// Queue an interactive question: a balloon carrying clickable choices, check boxes and
+    /// a commit-button row — the Office Assistant's balloon, rather than Microsoft Agent's
+    /// text-only one (see `docs/balloon-ui.md`).
+    ///
+    /// A [`Modal`](BalloonMode::Modal) question (the default) holds the queue until the user
+    /// answers; a [`Modeless`](BalloonMode::Modeless) one lingers while the character carries
+    /// on. Either way the balloon never auto-hides — a question waits.
+    ///
+    /// The host hit-tests clicks against [`BalloonView::ask`] and reports them with
+    /// [`report_ask_hit`](Agent::report_ask_hit); the answer arrives as [`Event::Answered`].
+    ///
+    /// ```no_run
+    /// # let mut agent = crustagent::Agent::load("Character.acs").unwrap();
+    /// use crustagent::{BalloonUi, ButtonSet};
+    /// agent.ask(
+    ///     BalloonUi::new("What would you like to do?")
+    ///         .heading("Getting started")
+    ///         .choice("Write a letter")
+    ///         .choice("Make a chart")
+    ///         .buttons(ButtonSet::Cancel),
+    /// );
+    /// ```
+    pub fn ask(&mut self, question: BalloonUi) -> ReqId {
+        self.request(Request::Ask(question))
+    }
+    /// The question currently on screen, if any.
+    pub fn pending_ask(&self) -> Option<&BalloonUi> {
+        self.ask.as_ref()
+    }
+    /// Bitmask of the check boxes ticked so far in the active question (bit *n* = box *n*).
+    pub fn ask_checked(&self) -> u8 {
+        self.ask_checked
+    }
+    /// Report a click that landed on part of an interactive balloon (hit-tested by the host
+    /// against [`BalloonView::ask`] — `crustagent-balloon`'s `ask_hit_test` does this for the
+    /// balloons it paints).
+    ///
+    /// A **choice** or a **button** answers the question and dismisses the balloon, raising
+    /// [`Event::Answered`]. A **check box** toggles and leaves the balloon up — the split
+    /// Office drew between `Labels` and `CheckBoxes`. Ignored when no question is showing.
+    ///
+    /// Call this on pointer **release**, not press, and only when the release lands on the
+    /// control the press armed — this is the commit, so a press the user drags away from
+    /// must not reach it. Hover and pressed feedback stays entirely host-side
+    /// (`crustagent-balloon`'s `AskState`); the agent never sees it.
+    pub fn report_ask_hit(&mut self, hit: AskHit) {
+        if self.ask.is_none() {
+            return;
+        }
+        match hit {
+            AskHit::CheckBox(i) if i < MAX_ITEMS => self.ask_checked ^= 1 << i,
+            AskHit::CheckBox(_) => {}
+            AskHit::Choice(i) => {
+                let choice = u8::try_from(i + 1).ok();
+                self.finish_ask(choice, None);
+            }
+            AskHit::Button(b) => self.finish_ask(None, Some(b)),
+        }
+    }
+    /// Dismiss the active question **without** answering it — no [`Event::Answered`] is
+    /// raised. A modal question stops holding the queue.
+    pub fn dismiss_ask(&mut self) {
+        if self.ask.is_some() {
+            self.clear_balloon();
+        }
+    }
     pub fn move_to(&mut self, x: i32, y: i32, speed: u32) -> ReqId {
         self.request(Request::MoveTo { x, y, speed })
     }
@@ -575,6 +684,10 @@ impl Agent {
         if self.track_loops && self.activity == Activity::Gesture {
             self.track_loops = false;
             self.track_elapsed_ms = self.track_total_ms;
+        }
+        // Likewise an unanswered question, which would otherwise wait forever.
+        if self.activity == Activity::Ask {
+            self.clear_balloon();
         }
     }
 
@@ -602,6 +715,10 @@ impl Agent {
 
     fn clear_balloon(&mut self) {
         self.speaking_overlay = false; // stop any parallel reveal
+                                       // Dropping the question is what releases a modal `Ask` activity: `update` advances
+                                       // the queue as soon as there is nothing left to wait for.
+        self.ask = None;
+        self.ask_checked = 0;
         if self.balloon_kind.take().is_some() {
             self.balloon_done = false;
             self.balloon_hold_ms = 0;
@@ -660,6 +777,13 @@ impl Agent {
             }
             Activity::Think => {
                 if self.poll_speech(dt_ms, true) {
+                    self.next();
+                }
+            }
+            // A modal question holds here until something drops it — an answer
+            // ([`report_ask_hit`]), a dismissal, or [`stop`].
+            Activity::Ask => {
+                if self.ask.is_none() {
                     self.next();
                 }
             }
@@ -759,6 +883,40 @@ impl Agent {
                 self.clear_balloon();
             }
         }
+    }
+
+    /// Put a question on screen. A modal one parks the character in [`Activity::Ask`] until
+    /// it is answered; a modeless / auto-down one leaves the balloon up and lets the queue
+    /// carry on. Either way the balloon does not auto-hide: a question waits for its answer.
+    fn begin_ask(&mut self, question: BalloonUi) {
+        let modal = question.mode == BalloonMode::Modal;
+        self.speak_mouth = None;
+        // Replaces any lingering balloon; must run *before* `ask` is set, since clearing a
+        // balloon is also what drops a question.
+        self.begin_balloon(BalloonKind::Speak, Vec::new(), Vec::new());
+        self.ask = Some(question);
+        self.ask_checked = 0;
+        self.balloon_done = true;
+        self.balloon_hold_ms = u32::MAX; // never auto-hide a question
+        if modal {
+            self.build_rest_track();
+            self.track_loops = true;
+            self.activity = Activity::Ask;
+        } else {
+            // Doesn't hold a queue slot — finish the request now and let the balloon linger.
+            self.next();
+        }
+    }
+
+    /// Answer the active question: raise [`Event::Answered`] and take the balloon down.
+    fn finish_ask(&mut self, choice: Option<u8>, button: Option<Button>) {
+        let checked = self.ask_checked;
+        self.clear_balloon(); // drops `ask`, releasing a modal wait
+        self.emit(Event::Answered {
+            choice,
+            button,
+            checked,
+        });
     }
 
     /// Set up the balloon for a new speak/think phrase.
@@ -909,6 +1067,7 @@ impl Agent {
                 self.track_loops = true;
                 self.activity = Activity::Think;
             }
+            Request::Ask(question) => self.begin_ask(question),
             Request::Wait(ms) => {
                 // Freeze the current frame for `ms`. Reduce the track to just that frame —
                 // otherwise the old (longer) track's timeline gets replayed from the start
@@ -1323,6 +1482,23 @@ impl Agent {
     /// activity: a balloon can linger (auto-hiding) while the character resumes idling.
     pub fn balloon(&self) -> Option<BalloonView> {
         let kind = self.balloon_kind?;
+        if let Some(question) = &self.ask {
+            // A question is fully present from the moment it appears — nothing to pace.
+            let ask = layout_ask(question, self.ask_checked, self.style.per_line);
+            let layout = BalloonLayout {
+                lines: ask.lines(),
+                cols: ask.cols,
+                rows: ask.rows.len(),
+            };
+            return Some(BalloonView {
+                full: layout.clone(),
+                layout,
+                total_words: 0,
+                shown_words: 0,
+                kind,
+                ask: Some(ask),
+            });
+        }
         if self.speak_words.is_empty() {
             return None;
         }
@@ -1353,6 +1529,7 @@ impl Agent {
             total_words: total,
             shown_words: shown,
             kind,
+            ask: None,
         })
     }
 }

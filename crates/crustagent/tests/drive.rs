@@ -616,3 +616,190 @@ fn speaks_one_of_several_alternatives() {
         b.total_words
     );
 }
+
+// -- interactive balloons (questions with clickable choices) ------------------------------
+
+use crustagent::{AskHit, BalloonMode, BalloonUi, Button, ButtonSet, Event};
+
+/// The demo question: two choices, one check box, and a Cancel button.
+fn question() -> BalloonUi {
+    BalloonUi::new("Select one of these things:")
+        .heading("What would you like to do?")
+        .choice("Write a letter")
+        .choice("Make a chart")
+        .checkbox("Don't ask again")
+        .buttons(ButtonSet::Cancel)
+}
+
+/// A shown, idling agent built from the synthetic character (no asset needed).
+fn asking_agent() -> Agent {
+    let mut agent = teleporter();
+    agent.show();
+    run(&mut agent, 500);
+    agent
+}
+
+#[test]
+fn modal_question_holds_the_queue_until_answered() {
+    let mut agent = asking_agent();
+    agent.ask(question());
+    let queued = agent.play("Idle");
+    run(&mut agent, 500);
+
+    // The question is up, and the request behind it has not started.
+    let view = agent.balloon().expect("balloon while asking");
+    let ask = view.ask.expect("interactive balloon");
+    assert_eq!(ask.buttons, vec![Button::Cancel]);
+    assert!(agent.pending_ask().is_some());
+    let mut events = Vec::new();
+    run_collect(&mut agent, 500, &mut events);
+    assert!(
+        !events.contains(&Event::RequestStarted(queued)),
+        "a modal question must hold the queue: {events:?}"
+    );
+
+    // Clicking a choice answers with its 1-based index and takes the balloon down.
+    agent.report_ask_hit(AskHit::Choice(1));
+    let answered: Vec<Event> = agent
+        .drain_events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::Answered { .. }))
+        .collect();
+    assert_eq!(
+        answered,
+        vec![Event::Answered {
+            choice: Some(2),
+            button: None,
+            checked: 0,
+        }]
+    );
+    assert!(agent.pending_ask().is_none());
+    assert!(agent.balloon().is_none());
+
+    // ...and the queue moves on.
+    let mut after = Vec::new();
+    run_collect(&mut agent, 500, &mut after);
+    assert!(
+        after.contains(&Event::RequestStarted(queued)),
+        "the queue should resume once answered: {after:?}"
+    );
+}
+
+#[test]
+fn check_boxes_toggle_and_ride_along_with_the_answer() {
+    let mut agent = asking_agent();
+    agent.ask(question());
+    run(&mut agent, 100);
+    let _ = agent.drain_events();
+
+    // A check box toggles in place — no answer, balloon stays up.
+    agent.report_ask_hit(AskHit::CheckBox(0));
+    assert_eq!(agent.ask_checked(), 0b1);
+    assert!(agent.balloon().is_some());
+    assert!(!agent
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, Event::Answered { .. })));
+
+    // It shows its state in the laid-out rows, and toggles back off.
+    let lines = agent.balloon().unwrap().layout.lines;
+    assert!(
+        lines.iter().any(|l| l.contains("[x] Don't ask again")),
+        "ticked box should render: {lines:?}"
+    );
+    agent.report_ask_hit(AskHit::CheckBox(0));
+    assert_eq!(agent.ask_checked(), 0);
+    agent.report_ask_hit(AskHit::CheckBox(0));
+
+    // The commit button is what carries the check-box state out.
+    agent.report_ask_hit(AskHit::Button(Button::Cancel));
+    let answered = agent
+        .drain_events()
+        .into_iter()
+        .find(|e| matches!(e, Event::Answered { .. }));
+    assert_eq!(
+        answered,
+        Some(Event::Answered {
+            choice: None,
+            button: Some(Button::Cancel),
+            checked: 0b1,
+        })
+    );
+}
+
+#[test]
+fn a_question_never_auto_hides() {
+    let mut agent = asking_agent();
+    agent.ask(question());
+    run(&mut agent, 30_000); // far past the 3s speech auto-hide
+    assert!(
+        agent.balloon().and_then(|b| b.ask).is_some(),
+        "a question waits for its answer"
+    );
+}
+
+#[test]
+fn modeless_question_lingers_without_holding_the_queue() {
+    let mut agent = asking_agent();
+    agent.ask(question().mode(BalloonMode::Modeless));
+    let queued = agent.play("Idle");
+    let mut events = Vec::new();
+    run_collect(&mut agent, 500, &mut events);
+
+    assert!(
+        events.contains(&Event::RequestStarted(queued)),
+        "a modeless question must not hold the queue: {events:?}"
+    );
+    assert!(
+        agent.pending_ask().is_some(),
+        "...but the balloon lingers, awaiting an answer"
+    );
+}
+
+#[test]
+fn auto_down_dismisses_on_a_click_without_answering() {
+    let mut agent = asking_agent();
+    agent.ask(question().mode(BalloonMode::AutoDown));
+    run(&mut agent, 100);
+    let _ = agent.drain_events();
+
+    agent.report_click(crustagent::MouseButton::Left, 0, 0);
+    assert!(agent.pending_ask().is_none());
+    assert!(
+        !agent
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, Event::Answered { .. })),
+        "an unanswered dismissal raises no Answered"
+    );
+}
+
+#[test]
+fn stop_releases_an_unanswered_modal_question() {
+    let mut agent = asking_agent();
+    agent.ask(question());
+    let queued = agent.play("Idle");
+    run(&mut agent, 200);
+
+    agent.stop(); // cancels `queued` and drops the question
+    assert!(agent.pending_ask().is_none());
+    let mut events = Vec::new();
+    run_collect(&mut agent, 500, &mut events);
+    assert!(
+        events.contains(&Event::RequestCompleted(queued)),
+        "stop() cancels the queue behind the question: {events:?}"
+    );
+    // The agent is free again — it goes back to idling rather than waiting forever.
+    assert!(agent.is_idle());
+}
+
+#[test]
+fn hits_are_ignored_when_no_question_is_showing() {
+    let mut agent = asking_agent();
+    agent.report_ask_hit(AskHit::Choice(0));
+    agent.report_ask_hit(AskHit::Button(Button::Ok));
+    assert!(!agent
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, Event::Answered { .. })));
+}
