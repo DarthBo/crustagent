@@ -77,8 +77,35 @@ pub enum ButtonSet {
     SearchClose,
 }
 
+/// Which end of the row the primary action sits at.
+///
+/// Platforms genuinely disagree, so this is a choice rather than a fact: Windows puts the
+/// affirmative button first (`OK  Cancel`), while the macOS and GNOME HIGs put it last
+/// (`Cancel  OK`) — as did the Office Assistant's own search balloon, whose *Search* sat to
+/// the right of *Options*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ButtonOrder {
+    /// Affirmative first: `OK  Cancel`, `Search  Close`.
+    PrimaryFirst,
+    /// Affirmative last: `Cancel  OK`, `Close  Search`.
+    PrimaryLast,
+}
+
+impl Default for ButtonOrder {
+    /// Follows the host platform's convention.
+    fn default() -> ButtonOrder {
+        if cfg!(target_os = "windows") {
+            ButtonOrder::PrimaryFirst
+        } else {
+            ButtonOrder::PrimaryLast
+        }
+    }
+}
+
 impl ButtonSet {
-    /// The buttons in this set, left to right.
+    /// The buttons in this set in **semantic** order, primary first — regardless of how they
+    /// are laid out. This is what identifies the affirmative action (see
+    /// `Agent::report_ask_submit`); for the order to *draw*, use [`ordered`](ButtonSet::ordered).
     pub fn buttons(self) -> &'static [Button] {
         match self {
             ButtonSet::None => &[],
@@ -90,6 +117,29 @@ impl ButtonSet {
             ButtonSet::NextClose => &[Button::Next, Button::Close],
             ButtonSet::BackNextClose => &[Button::Back, Button::Next, Button::Close],
             ButtonSet::SearchClose => &[Button::Search, Button::Close],
+        }
+    }
+
+    /// The buttons as they should be **drawn**, left to right, for a given order.
+    ///
+    /// Each set is spelled out rather than reversed, because reversing is wrong for
+    /// navigation: `Back  Next  Close` must not become `Close  Next  Back` — Back belongs
+    /// before Next whichever end the primary action is at. The auxiliary button moves; the
+    /// navigation pair keeps its reading order.
+    pub fn ordered(self, order: ButtonOrder) -> &'static [Button] {
+        if order == ButtonOrder::PrimaryFirst {
+            return self.buttons();
+        }
+        match self {
+            ButtonSet::None => &[],
+            ButtonSet::Ok => &[Button::Ok],
+            ButtonSet::Cancel => &[Button::Cancel],
+            ButtonSet::OkCancel => &[Button::Cancel, Button::Ok],
+            ButtonSet::YesNo => &[Button::No, Button::Yes],
+            ButtonSet::YesNoCancel => &[Button::Cancel, Button::No, Button::Yes],
+            ButtonSet::NextClose => &[Button::Close, Button::Next],
+            ButtonSet::BackNextClose => &[Button::Close, Button::Back, Button::Next],
+            ButtonSet::SearchClose => &[Button::Close, Button::Search],
         }
     }
 }
@@ -155,6 +205,9 @@ pub struct BalloonUi {
     pub input: Option<TextInput>,
     /// The commit-button row.
     pub buttons: ButtonSet,
+    /// Which end of that row the primary action sits at. Defaults to the host platform's
+    /// convention; set it explicitly to match an app that has its own house style.
+    pub button_order: ButtonOrder,
     /// How the choices render.
     pub style: ChoiceStyle,
     /// When the balloon goes away.
@@ -211,6 +264,11 @@ impl BalloonUi {
     /// Set the commit-button row.
     pub fn buttons(mut self, buttons: ButtonSet) -> BalloonUi {
         self.buttons = buttons;
+        self
+    }
+    /// Override which end of the button row the primary action sits at.
+    pub fn button_order(mut self, order: ButtonOrder) -> BalloonUi {
+        self.button_order = order;
         self
     }
     /// Set how the choices render.
@@ -681,7 +739,7 @@ pub fn layout_ask(ui: &BalloonUi, answer: &AskAnswer, per_line: usize) -> AskLay
         view
     });
 
-    let buttons = ui.buttons.buttons().to_vec();
+    let buttons = ui.buttons.ordered(ui.button_order).to_vec();
     if !buttons.is_empty() {
         // The button row's text is the ASCII fallback rendering; a real renderer draws
         // buttons from `AskLayout::buttons` instead and ignores this.
@@ -722,7 +780,9 @@ mod tests {
             .choice("Portrait")
             .choice("Landscape")
             .checkbox("Remember this")
-            .buttons(ButtonSet::OkCancel);
+            .buttons(ButtonSet::OkCancel)
+            // Pinned, so this test asserts layout rather than the platform's button order.
+            .button_order(ButtonOrder::PrimaryFirst);
         let l = layout_ask(&ui, &AskAnswer::default(), 40);
         let roles: Vec<AskRole> = l.rows.iter().map(|r| r.role).collect();
         assert_eq!(
@@ -807,7 +867,8 @@ mod tests {
             .choice("Print")
             .checkbox("Search help too")
             .input("Type your question here")
-            .buttons(ButtonSet::SearchClose);
+            .buttons(ButtonSet::SearchClose)
+            .button_order(ButtonOrder::PrimaryFirst);
         let l = layout_ask(&ui, &AskAnswer::default(), 40);
         let roles: Vec<AskRole> = l.rows.iter().map(|r| r.role).collect();
         assert_eq!(
@@ -932,6 +993,61 @@ mod tests {
         assert_eq!(
             l.rows.iter().filter(|r| r.role == AskRole::Input).count(),
             1
+        );
+    }
+
+    #[test]
+    fn the_button_order_is_a_policy_not_a_reversal() {
+        let set = |s: ButtonSet, o: ButtonOrder| s.ordered(o).to_vec();
+        use ButtonOrder::*;
+
+        // The affirmative swaps ends...
+        assert_eq!(
+            set(ButtonSet::OkCancel, PrimaryFirst),
+            [Button::Ok, Button::Cancel]
+        );
+        assert_eq!(
+            set(ButtonSet::OkCancel, PrimaryLast),
+            [Button::Cancel, Button::Ok]
+        );
+        assert_eq!(
+            set(ButtonSet::SearchClose, PrimaryLast),
+            [Button::Close, Button::Search],
+            "Search sits right, as the Assistant's own search balloon had it"
+        );
+
+        // ...but navigation keeps its reading order: a plain reverse would put Back after
+        // Next, which is nonsense in any layout.
+        assert_eq!(
+            set(ButtonSet::BackNextClose, PrimaryLast),
+            [Button::Close, Button::Back, Button::Next]
+        );
+
+        // Whatever the layout, the *semantic* primary is unchanged — it is what Enter
+        // submits as.
+        for order in [PrimaryFirst, PrimaryLast] {
+            assert_eq!(
+                ButtonSet::SearchClose.buttons().first(),
+                Some(&Button::Search)
+            );
+            assert_eq!(set(ButtonSet::SearchClose, order).len(), 2);
+        }
+    }
+
+    #[test]
+    fn the_layout_draws_buttons_in_the_questions_order() {
+        let ui = |order| {
+            BalloonUi::new("")
+                .buttons(ButtonSet::OkCancel)
+                .button_order(order)
+        };
+        assert_eq!(
+            layout_ask(&ui(ButtonOrder::PrimaryLast), &AskAnswer::default(), 40).buttons,
+            vec![Button::Cancel, Button::Ok]
+        );
+        assert_eq!(
+            layout_ask(&ui(ButtonOrder::PrimaryFirst), &AskAnswer::default(), 40).buttons,
+            vec![Button::Ok, Button::Cancel]
         );
     }
 

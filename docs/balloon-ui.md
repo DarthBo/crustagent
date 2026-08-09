@@ -399,6 +399,29 @@ The agent owns the buffer, as it already owned `checked`, and the host reports i
 | `report_ask_select_word(usize)` | Select the run around an offset — a double-click |
 | `report_ask_submit()` | What Enter does: answers with the field's contents and the set's **first** button, mirroring the search balloon submitting as *Search* |
 
+### 4.1.3 Button order
+
+Office's constant *names* imply an order — `msoButtonSetOkCancel`, `msoButtonSetSearchClose` —
+and the first cut took them literally, putting Search on the left. That is a Windows-era reading,
+and it contradicts both the reference screenshots (where *Search* sits right of *Options*) and the
+macOS and GNOME HIGs, which put the primary action rightmost.
+
+Platforms genuinely disagree here, so it is a **policy**, not a fact: `BalloonUi.button_order:
+ButtonOrder` is `PrimaryFirst` or `PrimaryLast`, defaulting to the host platform's convention
+(`PrimaryFirst` on Windows, `PrimaryLast` elsewhere) and overridable per question by the client.
+
+Two things follow:
+
+- `ButtonSet::buttons()` keeps the **semantic** order, primary first, whatever the layout. That is
+  what identifies the affirmative action, so `report_ask_submit` still submits `SearchClose` as
+  *Search* however it is drawn. `ButtonSet::ordered(order)` gives the drawing order.
+- The reordering is **spelled out per set rather than reversed**, because reversing is wrong for
+  navigation: `Back  Next  Close` must not become `Close  Next  Back`. Back belongs before Next in
+  either layout; it is the auxiliary button that moves, giving `Close  Back  Next`.
+
+Any test that asserts a drawn button order must pin `button_order` explicitly, or it asserts the
+build platform instead.
+
 ### 5.2.1 Selection and the clipboard
 
 `AskAnswer.anchor: Option<usize>` is the fixed end of the selection; `caret` is the moving end.

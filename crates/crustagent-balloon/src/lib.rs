@@ -1688,19 +1688,20 @@ mod tests {
 
     #[test]
     fn buttons_get_side_by_side_regions_in_order() {
-        use crustagent_core::ask::Button;
         let layout = ask_layout();
         let (w, _h) = ask_size(&AskFonts::new(None), &layout, 2.0);
         let buttons: Vec<AskRect> = ask_rects(&layout, &AskFonts::new(None), w, false, 2.0)
             .into_iter()
             .filter(|r| matches!(r.hit, AskHit::Button(_)))
             .collect();
-        assert_eq!(buttons[0].hit, AskHit::Button(Button::Ok));
-        assert_eq!(buttons[1].hit, AskHit::Button(Button::Cancel));
+        // The regions follow the layout's own order, whichever end the primary is at — that
+        // choice is the question's (`ButtonOrder`), not this crate's.
+        let expected: Vec<AskHit> = layout.buttons.iter().map(|b| AskHit::Button(*b)).collect();
+        assert_eq!(buttons.iter().map(|r| r.hit).collect::<Vec<_>>(), expected);
         assert_eq!(buttons[0].y, buttons[1].y, "same row");
         assert!(
             buttons[1].x >= buttons[0].x + buttons[0].w,
-            "Cancel sits right of OK without overlapping: {buttons:?}"
+            "the second button sits right of the first without overlapping: {buttons:?}"
         );
 
         // Same again through the real-font measuring path, which is what actually ships

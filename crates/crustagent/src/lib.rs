@@ -46,7 +46,7 @@ const THINK_PACE_MS: u32 = 300;
 /// depend on `crustagent-core` directly.
 pub use crustagent_core::ask::{
     layout_ask, AskAnswer, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button,
-    ButtonSet, ChoiceStyle, FieldState, InputView, RowMarker, TextInput, MAX_ITEMS,
+    ButtonOrder, ButtonSet, ChoiceStyle, FieldState, InputView, RowMarker, TextInput, MAX_ITEMS,
 };
 pub use crustagent_format::{self as format, AcsFile as CharacterFile, Gender, MouthOverlay, Rgba};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent, VoiceRequest};
