@@ -671,6 +671,7 @@ fn modal_question_holds_the_queue_until_answered() {
             choice: Some(2),
             button: None,
             checked: 0,
+            text: None,
         }]
     );
     assert!(agent.pending_ask().is_none());
@@ -723,6 +724,7 @@ fn check_boxes_toggle_and_ride_along_with_the_answer() {
             choice: None,
             button: Some(Button::Cancel),
             checked: 0b1,
+            text: None,
         })
     );
 }
@@ -802,4 +804,174 @@ fn hits_are_ignored_when_no_question_is_showing() {
         .drain_events()
         .iter()
         .any(|e| matches!(e, Event::Answered { .. })));
+}
+
+// -- the balloon's text field ------------------------------------------------------------
+
+use crustagent::AskEdit;
+
+/// A search-style question: a text field and Search/Close.
+fn search_question() -> BalloonUi {
+    BalloonUi::new("What would you like to do?")
+        .input("Type your question here")
+        .buttons(ButtonSet::SearchClose)
+}
+
+#[test]
+fn typing_fills_the_field_and_rides_out_with_the_answer() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+    let _ = agent.drain_events();
+    assert!(agent.ask_has_input());
+
+    agent.report_ask_text("mail merge");
+    assert_eq!(agent.ask_text(), "mail merge");
+    assert_eq!(agent.ask_caret(), 10);
+
+    // The balloon shows what was typed rather than the placeholder.
+    let view = agent.balloon().unwrap().ask.unwrap().input.unwrap();
+    assert_eq!(view.value, "mail merge");
+    assert!(!view.shows_prompt(false));
+
+    // Enter submits with the set's first button — Search, as Office's search balloon did.
+    agent.report_ask_submit();
+    let answered = agent
+        .drain_events()
+        .into_iter()
+        .find(|e| matches!(e, crustagent::Event::Answered { .. }));
+    assert_eq!(
+        answered,
+        Some(crustagent::Event::Answered {
+            choice: None,
+            button: Some(crustagent::Button::Search),
+            checked: 0,
+            text: Some("mail merge".to_string()),
+        })
+    );
+}
+
+#[test]
+fn editing_keys_move_the_caret_and_delete_around_it() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    agent.report_ask_text("mail merge");
+    agent.report_ask_edit(AskEdit::Home);
+    assert_eq!(agent.ask_caret(), 0);
+    agent.report_ask_edit(AskEdit::Backspace); // at the start: nothing to delete
+    assert_eq!(agent.ask_text(), "mail merge");
+
+    agent.report_ask_edit(AskEdit::Delete);
+    assert_eq!(agent.ask_text(), "ail merge");
+
+    agent.report_ask_edit(AskEdit::End);
+    agent.report_ask_edit(AskEdit::Backspace);
+    assert_eq!(agent.ask_text(), "ail merg");
+
+    // Insertion happens at the caret, not the end.
+    agent.report_ask_edit(AskEdit::Home);
+    agent.report_ask_edit(AskEdit::Right);
+    agent.report_ask_text("XY");
+    assert_eq!(agent.ask_text(), "aXYil merg");
+
+    agent.report_ask_edit(AskEdit::Clear);
+    assert_eq!(agent.ask_text(), "");
+    assert_eq!(agent.ask_caret(), 0);
+}
+
+#[test]
+fn editing_a_multibyte_value_never_splits_a_char() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    // Accents and an emoji: every one is multi-byte, so a byte-indexed caret would panic.
+    agent.report_ask_text("héllo 🌍");
+    assert_eq!(agent.ask_caret(), 7);
+    agent.report_ask_edit(AskEdit::Backspace);
+    assert_eq!(agent.ask_text(), "héllo ");
+    agent.report_ask_edit(AskEdit::Home);
+    agent.report_ask_edit(AskEdit::Right);
+    agent.report_ask_text("é");
+    assert_eq!(agent.ask_text(), "hééllo ");
+}
+
+#[test]
+fn control_characters_never_reach_the_field() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    // Enter and Tab are the host's to interpret; they must not land in the buffer.
+    agent.report_ask_text("a\nb\tc\r");
+    assert_eq!(agent.ask_text(), "abc");
+}
+
+#[test]
+fn the_caret_can_be_placed_by_a_click_and_is_clamped() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+
+    agent.report_ask_text("hello");
+    agent.report_ask_caret(2);
+    assert_eq!(agent.ask_caret(), 2);
+    agent.report_ask_caret(999);
+    assert_eq!(agent.ask_caret(), 5);
+}
+
+#[test]
+fn a_question_without_a_field_ignores_text_entirely() {
+    let mut agent = asking_agent();
+    agent.ask(question()); // choices + check box, no field
+    run(&mut agent, 100);
+    let _ = agent.drain_events();
+
+    assert!(!agent.ask_has_input());
+    agent.report_ask_text("ignored");
+    agent.report_ask_edit(AskEdit::Backspace);
+    agent.report_ask_submit();
+    assert_eq!(agent.ask_text(), "");
+    assert!(agent.pending_ask().is_some(), "submit must not answer it");
+    assert!(!agent
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, crustagent::Event::Answered { .. })));
+
+    // ...and its answer carries no text.
+    agent.report_ask_hit(AskHit::Choice(0));
+    let answered = agent
+        .drain_events()
+        .into_iter()
+        .find(|e| matches!(e, crustagent::Event::Answered { .. }));
+    assert!(matches!(
+        answered,
+        Some(crustagent::Event::Answered { text: None, .. })
+    ));
+}
+
+#[test]
+fn a_prefilled_field_starts_populated_with_the_caret_at_the_end() {
+    let mut agent = asking_agent();
+    agent.ask(BalloonUi::new("Search for:").input_with("Search", "Resume"));
+    run(&mut agent, 100);
+    assert_eq!(agent.ask_text(), "Resume");
+    assert_eq!(agent.ask_caret(), 6);
+}
+
+#[test]
+fn clicking_the_field_does_not_answer_the_question() {
+    let mut agent = asking_agent();
+    agent.ask(search_question());
+    run(&mut agent, 100);
+    let _ = agent.drain_events();
+
+    agent.report_ask_hit(AskHit::Input);
+    assert!(agent.pending_ask().is_some());
+    assert!(!agent
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, crustagent::Event::Answered { .. })));
 }

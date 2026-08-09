@@ -353,7 +353,94 @@ own help UI.
 
 ---
 
-## 5. Not specified here
+## 5. The text field — a crustagent extension
+
+Office's own screenshots show a balloon with a text box and a **Search** button: *"What would you
+like to do?"* with a typed question. That balloon was **never reachable from the API**. The
+`Balloon` object's full member list (§2.1) has no text-input member at all — `Labels` and
+`CheckBoxes` are its only controls. The search box belongs to MSO's built-in help balloon, driven by
+`Assistant.Help` and the separate `AnswerWizard` object, which `Assistant.NewBalloon` could not
+reproduce.
+
+There is a revealing half-exception: the *buttons* from that balloon were exposed —
+`msoBalloonButtonSearch` / `Options` / `Tips` / `Snooze` are all in `MsoBalloonButtonType`, and
+`msoButtonSetSearchClose` in `MsoButtonSetType`. A developer could put a Search button on a balloon
+and have nothing to search from.
+
+crustagent adds the field, so the pairing finally means something. It is marked as an extension
+everywhere it appears (`TextInput`'s doc comment, `Button::Search`) so it is never mistaken for
+recovered behaviour.
+
+### 5.1 Model
+
+`BalloonUi.input: Option<TextInput { placeholder, initial }>`, built with `.input(placeholder)` or
+`.input_with(placeholder, initial)`. It lays out as one `AskRole::Input` row between the check boxes
+and the button row — where the Assistant's own box sat.
+
+The *live* state moved into `AskAnswer { checked, text, caret }`, which the agent owns per question
+and `layout_ask` reads; the bare `checked: u8` parameter it replaces was never going to carry a
+string. `AskLayout.input: Option<InputView>` carries what to draw: the value (or the placeholder),
+whether it *is* the placeholder, the caret, and the prompt — the last so a renderer sizes the box
+from the placeholder rather than the value.
+
+**The caret is a char offset, not a byte offset.** `caret_char()` clamps it and `caret_byte()`
+converts for slicing, so no edit can split a multi-byte character.
+
+### 5.2 Editing
+
+The agent owns the buffer, as it already owned `checked`, and the host reports intent:
+
+| Host call | Effect |
+| --- | --- |
+| `report_ask_text(&str)` | Insert at the caret. Control characters are stripped — Enter and Tab are the host's to interpret and must never land in the buffer |
+| `report_ask_edit(AskEdit)` | `Backspace` / `Delete` / `Left` / `Right` / `Home` / `End` / `Clear` |
+| `report_ask_caret(usize)` | Place the caret, e.g. from a click (`ask_caret_at` maps a pixel x to an offset) |
+| `report_ask_submit()` | What Enter does: answers with the field's contents and the set's **first** button, mirroring the search balloon submitting as *Search* |
+
+`Event::Answered` gained `text: Option<String>` — `Some` exactly when the question had a field.
+**This costs `Event` its `Copy`**, which §4.2 previously leaned on; it stays `Clone`, which is all
+`drain_events` needs. Indices and the bitmask are kept as they were: only the typed text genuinely
+needs an allocation.
+
+Clicking the field is *not* an answer — `AskHit::Input` places the caret and nothing else.
+
+### 5.3 Rendering
+
+The field draws as a white, bordered, rounded box. **Focus is real state**, on
+`AskState.focused` alongside hover and pressed — host state, for the same reason: the agent has no
+pointer. A question opens unfocused; clicking the field (or typing into it) focuses it.
+
+| Focus | Empty | With a value |
+| --- | --- | --- |
+| Unfocused | Dimmed placeholder, quiet border | Value, quiet border |
+| Focused | **No placeholder**, caret at the start, accent border | Value + caret, accent border |
+
+The placeholder gives way the moment the field is focused: a hint that survives your click is a
+hint that has outstayed its welcome, and it leaves the caret nowhere to sit. `InputView` therefore
+keeps `value` and `prompt` as separate fields, with `shows_prompt(focused)` / `display(focused)`
+resolving them — an earlier design collapsed them into one `text` plus a `placeholder` flag, which
+could not express "focused and empty".
+
+The caret is drawn whenever the field is focused, including when it is empty, and its blink is
+driven by the **host** through `AskState.caret_on` — the host owns the frame clock. Focusing or
+typing restarts the blink, so the caret is solid the instant it matters rather than half-way
+through an off phase.
+
+A value wider than the box **scrolls rather than wraps**, so the balloon never resizes as you type:
+`input_scroll` offsets the text to keep the caret in view, and the text is drawn inside a clip rect
+(new on `Canvas`) so the overflow is cut off at the box edge instead of spilling across the balloon.
+
+Sizing therefore comes from the placeholder and a `INPUT_MIN_CHARS` floor — never from the value.
+
+### 5.4 Not done
+
+Selection (and so shift-arrows, double-click-to-word, cut/copy/paste of a range), multi-line fields,
+and more than one field per balloon. The reference screenshots show the pre-filled value *selected*
+on open; crustagent places the caret at the end instead.
+
+---
+
+## 6. Not specified here
 
 - **Pixel metrics.** Office's balloon padding, button sizing, label indent, and check-box glyph are
   not documented and were not measured. The renderer derives them from the character's own balloon

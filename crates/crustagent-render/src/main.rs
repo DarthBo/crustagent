@@ -22,10 +22,10 @@ mod present;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crustagent::{Agent, BalloonKind, BalloonUi, ButtonSet, ChoiceStyle, Request};
+use crustagent::{Agent, AskEdit, BalloonKind, BalloonUi, ButtonSet, ChoiceStyle, Request};
 use crustagent_balloon::{
-    ask_hit_test, ask_size, balloon_size, paint_ask_into, paint_into, AskFonts, AskState,
-    BalloonPaint, Font,
+    ask_caret_at, ask_hit_test, ask_size, balloon_size, paint_ask_into, paint_into, AskFonts,
+    AskState, BalloonPaint, Font,
 };
 use crustagent_format::{act::CelFormat, ActFile, Rgba};
 use present::WgpuPresenter;
@@ -41,6 +41,8 @@ const SCALE: i32 = 3;
 const GAP: i32 = 4; // px between balloon and character
 
 const MENU_MAX_H: i32 = 640; // tall menus scroll instead of growing past this
+/// Half-period of the text field's caret blink.
+const CARET_BLINK: Duration = Duration::from_millis(530);
 
 /// All actions: play any of the character's animations (sorted), plus Speak and Hide.
 fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
@@ -64,6 +66,15 @@ fn build_menu_items(agent: &Agent) -> Vec<(String, Request)> {
                     .choice("Nothing, thanks")
                     .checkbox("Don't ask again")
                     .buttons(ButtonSet::Cancel),
+            ),
+        ),
+        (
+            "Ask (search)".to_string(),
+            Request::Ask(
+                BalloonUi::new("Type your question, then click Search.")
+                    .heading("What would you like to do?")
+                    .input("Type your question here")
+                    .buttons(ButtonSet::SearchClose),
             ),
         ),
     ];
@@ -177,6 +188,10 @@ struct App {
     /// Which control the pointer is over / holding down, for hover + pressed feedback. Pure
     /// presentation state — the agent only hears about a control when it is *committed*.
     ask_state: AskState,
+    /// When the text field's caret last toggled, for the blink.
+    caret_blinked: Instant,
+    /// Whether the balloon window has been given the keyboard for the current question.
+    ask_focused: bool,
 
     // command menu (its own scrollable window)
     menu_window: Option<Arc<Window>>,
@@ -380,13 +395,42 @@ impl App {
         )
     }
 
+    /// The caret offset for a click at the balloon cursor, when it is inside the field.
+    fn ask_caret_at_cursor(&self) -> Option<usize> {
+        let ask = self.agent.balloon()?.ask?;
+        ask_caret_at(
+            &ask,
+            &AskFonts::new(self.font.as_ref()).with_bold(self.font_bold.as_ref()),
+            self.balloon_dim.0,
+            self.balloon_below,
+            self.font_scale,
+            self.balloon_cursor.0,
+        )
+    }
+
+    /// Focus (or blur) the balloon's text field, resetting the caret blink so it is solid
+    /// the instant focus lands rather than half-way through an off phase.
+    fn focus_field(&mut self, focused: bool) {
+        self.ask_state.focused = focused;
+        self.caret_blinked = Instant::now();
+        self.ask_state.caret_on = true;
+        if let Some(win) = &self.balloon_window {
+            win.request_redraw();
+        }
+    }
+
     /// Update hover / pressed state, redrawing the balloon only when it actually changed.
     fn set_ask_state(
         &mut self,
         hover: Option<crustagent::AskHit>,
         pressed: Option<crustagent::AskHit>,
     ) {
-        let next = AskState { hover, pressed };
+        let next = AskState {
+            hover,
+            pressed,
+            focused: self.ask_state.focused,
+            caret_on: self.ask_state.caret_on,
+        };
         if next == self.ask_state {
             return;
         }
@@ -475,6 +519,45 @@ impl ApplicationHandler for App {
                 self.ensure_font(scale_factor as f32);
                 self.balloon_dim = (0, 0);
             }
+            // A balloon with a text field swallows the keyboard: otherwise typing "q" into
+            // the question would quit the app.
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && self.agent.ask_has_input() =>
+            {
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::Escape) => self.agent.dismiss_ask(),
+                    PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
+                        self.agent.report_ask_submit()
+                    }
+                    PhysicalKey::Code(KeyCode::Backspace) => {
+                        self.agent.report_ask_edit(AskEdit::Backspace)
+                    }
+                    PhysicalKey::Code(KeyCode::Delete) => {
+                        self.agent.report_ask_edit(AskEdit::Delete)
+                    }
+                    PhysicalKey::Code(KeyCode::ArrowLeft) => {
+                        self.agent.report_ask_edit(AskEdit::Left)
+                    }
+                    PhysicalKey::Code(KeyCode::ArrowRight) => {
+                        self.agent.report_ask_edit(AskEdit::Right)
+                    }
+                    PhysicalKey::Code(KeyCode::Home) => self.agent.report_ask_edit(AskEdit::Home),
+                    PhysicalKey::Code(KeyCode::End) => self.agent.report_ask_edit(AskEdit::End),
+                    // Everything else is text if it produced any (control chars are dropped
+                    // agent-side, so dead keys and modifiers cost nothing here).
+                    _ => {
+                        if let Some(text) = &event.text {
+                            self.agent.report_ask_text(text);
+                        }
+                    }
+                }
+                // Typing focuses the field as surely as clicking it does, and restarts the
+                // blink so the caret stays solid while the keys are coming.
+                self.focus_field(true);
+                if let Some(win) = &self.balloon_window {
+                    win.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::Escape) if is_menu => self.close_menu(),
@@ -554,6 +637,16 @@ impl ApplicationHandler for App {
                     // Arm the control under the pointer — it draws pressed. Committing waits
                     // for the release, so a press can still be cancelled by dragging off.
                     let hit = self.ask_hit();
+                    if hit == Some(crustagent::AskHit::Input) {
+                        // Clicking into the field focuses it: the placeholder gives way to a
+                        // caret, placed where the click landed.
+                        if let Some(caret) = self.ask_caret_at_cursor() {
+                            self.agent.report_ask_caret(caret);
+                        }
+                        self.focus_field(true);
+                    } else if hit.is_some() {
+                        self.focus_field(false);
+                    }
                     self.set_ask_state(hit, hit);
                 } else if is_menu && button == MouseButton::Left {
                     if let Some(i) = self.menu_hover() {
@@ -665,12 +758,36 @@ impl ApplicationHandler for App {
             };
             self.ensure_balloon_window(el, bw, bh);
             self.reposition_balloon();
+            // Blink the caret while a text field is up, and give that balloon the keyboard
+            // focus it needs to receive any typing at all.
+            let mut blink_redraw = false;
+            if self.agent.ask_has_input() && self.ask_state.focused {
+                if now.duration_since(self.caret_blinked) >= CARET_BLINK {
+                    self.caret_blinked = now;
+                    self.ask_state.caret_on = !self.ask_state.caret_on;
+                    blink_redraw = true;
+                }
+            } else if !self.ask_state.caret_on {
+                self.ask_state.caret_on = true;
+            }
+            let needs_focus = self.agent.ask_has_input() && !self.ask_focused;
             if let Some(win) = &self.balloon_window {
                 win.set_visible(true);
+                if needs_focus {
+                    win.focus_window();
+                }
                 win.request_redraw();
             }
-        } else if let Some(win) = &self.balloon_window {
-            win.set_visible(false);
+            if needs_focus {
+                self.ask_focused = true;
+            }
+            let _ = blink_redraw;
+        } else {
+            self.ask_focused = false;
+            self.ask_state.focused = false;
+            if let Some(win) = &self.balloon_window {
+                win.set_visible(false);
+            }
         }
 
         el.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(16)));
@@ -763,14 +880,14 @@ fn main() {
                 .choice("Make a chart")
         };
         let idle = AskState::default();
-        let variants: Vec<(&str, BalloonUi, bool, u8, AskState)> = vec![
+        let variants: Vec<(&str, BalloonUi, bool, crustagent::AskAnswer, AskState)> = vec![
             (
                 "Buttons (default) + check box + OK/Cancel",
                 classic()
                     .checkbox("Don't ask again")
                     .buttons(ButtonSet::OkCancel),
                 false,
-                0b1,
+                crustagent::AskAnswer::checked(0b1),
                 idle,
             ),
             (
@@ -779,10 +896,10 @@ fn main() {
                     .checkbox("Don't ask again")
                     .buttons(ButtonSet::OkCancel),
                 false,
-                0b1,
+                crustagent::AskAnswer::checked(0b1),
                 AskState {
                     hover: Some(crustagent::AskHit::Choice(1)),
-                    pressed: None,
+                    ..AskState::default()
                 },
             ),
             (
@@ -791,10 +908,10 @@ fn main() {
                     .checkbox("Don't ask again")
                     .buttons(ButtonSet::OkCancel),
                 false,
-                0,
+                crustagent::AskAnswer::default(),
                 AskState {
                     hover: Some(crustagent::AskHit::CheckBox(0)),
-                    pressed: None,
+                    ..AskState::default()
                 },
             ),
             (
@@ -803,24 +920,25 @@ fn main() {
                     .checkbox("Don't ask again")
                     .buttons(ButtonSet::OkCancel),
                 false,
-                0b1,
+                crustagent::AskAnswer::checked(0b1),
                 AskState {
                     hover: Some(crustagent::AskHit::Button(crustagent::Button::Cancel)),
                     pressed: Some(crustagent::AskHit::Button(crustagent::Button::Cancel)),
+                    ..AskState::default()
                 },
             ),
             (
                 "Numbers",
                 classic().style(ChoiceStyle::Numbers).buttons(ButtonSet::Ok),
                 false,
-                0,
+                crustagent::AskAnswer::default(),
                 idle,
             ),
             (
                 "Bullets",
                 classic().style(ChoiceStyle::Bullets),
                 false,
-                0,
+                crustagent::AskAnswer::default(),
                 idle,
             ),
             (
@@ -831,15 +949,72 @@ fn main() {
                     .checkbox("East")
                     .buttons(ButtonSet::YesNoCancel),
                 false,
-                0b101,
+                crustagent::AskAnswer::checked(0b101),
                 idle,
             ),
             (
                 "Tail below (balloon under the character)",
                 classic().buttons(ButtonSet::Cancel),
                 true,
-                0,
+                crustagent::AskAnswer::default(),
                 idle,
+            ),
+            (
+                "Search: empty field shows its placeholder",
+                BalloonUi::new("Type your question, then click Search.")
+                    .heading("What would you like to do?")
+                    .input("Type your question here")
+                    .buttons(ButtonSet::SearchClose),
+                false,
+                crustagent::AskAnswer::default(),
+                idle,
+            ),
+            (
+                "Search: focused and empty — placeholder gone, caret showing",
+                BalloonUi::new("Type your question, then click Search.")
+                    .heading("What would you like to do?")
+                    .input("Type your question here")
+                    .buttons(ButtonSet::SearchClose),
+                false,
+                crustagent::AskAnswer::default(),
+                AskState {
+                    focused: true,
+                    ..AskState::default()
+                },
+            ),
+            (
+                "Search: typed, caret mid-value, Search hovered",
+                BalloonUi::new("Type your question, then click Search.")
+                    .heading("What would you like to do?")
+                    .input("Type your question here")
+                    .buttons(ButtonSet::SearchClose),
+                false,
+                crustagent::AskAnswer {
+                    text: "How do I do mail merge?".into(),
+                    caret: 9,
+                    ..Default::default()
+                },
+                AskState {
+                    hover: Some(crustagent::AskHit::Button(crustagent::Button::Search)),
+                    focused: true,
+                    ..AskState::default()
+                },
+            ),
+            (
+                "Search: a value longer than the field, scrolled to the caret",
+                BalloonUi::new("")
+                    .input("Search")
+                    .buttons(ButtonSet::SearchClose),
+                false,
+                crustagent::AskAnswer {
+                    text: "a question far too long to fit inside the field at once".into(),
+                    caret: 55,
+                    ..Default::default()
+                },
+                AskState {
+                    focused: true,
+                    ..AskState::default()
+                },
             ),
             (
                 "A choice long enough to wrap",
@@ -847,15 +1022,15 @@ fn main() {
                     .choice("Write a long and rather rambling letter to the editor")
                     .choice("Stop"),
                 false,
-                0,
+                crustagent::AskAnswer::default(),
                 idle,
             ),
         ];
 
         let paint = BalloonPaint::default();
         let mut tiles: Vec<(Vec<u8>, u32, u32)> = Vec::new();
-        for (name, question, below, checked, state) in &variants {
-            let layout = crustagent::layout_ask(question, *checked, 32);
+        for (name, question, below, answer, state) in &variants {
+            let layout = crustagent::layout_ask(question, answer, 32);
             let (w, h) = ask_size(&fonts, &layout, 2.0);
             let mut buf = vec![0x50u8; (w * h * 4) as usize];
             for px in buf.chunks_exact_mut(4) {
@@ -1040,6 +1215,8 @@ fn main() {
         balloon_below: false,
         balloon_cursor: (-1, -1),
         ask_state: AskState::default(),
+        caret_blinked: Instant::now(),
+        ask_focused: false,
         menu_window: None,
         menu_presenter: None,
         menu_scratch: Vec::new(),

@@ -46,7 +46,7 @@
 //! // img.rgba is img.width * img.height * 4 bytes, top-down, [r,g,b,a].
 //! ```
 
-use crustagent_core::ask::{AskHit, AskLayout, AskRole, RowMarker};
+use crustagent_core::ask::{AskHit, AskLayout, AskRole, InputView, RowMarker};
 use font8x8::legacy::BASIC_LEGACY;
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -398,6 +398,7 @@ pub fn paint_into(
         buf,
         w: w as i32,
         h: h as i32,
+        clip: None,
     }
     .balloon(lines, below, paint, font, scale);
 }
@@ -415,6 +416,12 @@ const GROUP_GAP: f32 = 6.0;
 const HEADING_GAP: f32 = 7.0;
 /// Breathing room between a row's marker column and its label.
 const MARKER_GAP: f32 = 5.0;
+/// Text-field chrome, at scale 1.0.
+const INPUT_HPAD: f32 = 6.0;
+const INPUT_VPAD: f32 = 4.0;
+/// Narrowest a text field is allowed to get, in `x`-widths — it must look typeable even
+/// beside a one-word question.
+const INPUT_MIN_CHARS: i32 = 18;
 
 /// The faces an interactive balloon draws with: the body face, and an optional **bold** one
 /// for the heading (Office drew the balloon's `Heading` in bold). With no bold face the
@@ -512,7 +519,7 @@ fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
                 seen_check = true;
                 group_gap
             }
-            AskRole::Buttons => group_gap,
+            AskRole::Input | AskRole::Buttons => group_gap,
             _ => 0,
         };
         // The heading gets its own breathing room below it — max'd with any group gap, so a
@@ -526,6 +533,28 @@ fn ask_metrics(layout: &AskLayout, fonts: &AskFonts, scale: f32) -> AskMetrics {
             _ => {}
         }
         y += gap;
+
+        if row.role == AskRole::Input {
+            let hpad = px(INPUT_HPAD);
+            let char_w = fonts.text.map(|f| f.avg_advance()).unwrap_or(8 * BSCALE);
+            // Sized from the *placeholder*, never the typed value: a field that grew with
+            // its contents would resize the balloon out from under the typist.
+            let prompt = layout
+                .input
+                .as_ref()
+                .map(|v| v.prompt.as_str())
+                .unwrap_or("");
+            let need = measure_text(fonts.text, prompt).max(INPUT_MIN_CHARS * char_w) + 2 * hpad;
+            w = w.max(need);
+            let h = line_h + 2 * px(INPUT_VPAD);
+            rows.push(RowMetric {
+                dy: y,
+                h,
+                text_dx: hpad,
+            });
+            y += h;
+            continue;
+        }
 
         if row.role == AskRole::Buttons {
             let h = line_h + 2 * btn_vpad;
@@ -588,10 +617,27 @@ pub enum Phase {
 /// [`paint_ask_into`]. Note that a control is only *committed* on release, and only if the
 /// release lands on the same control the press did: that's what makes a press cancellable by
 /// dragging off, the way every other button behaves.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AskState {
     pub hover: Option<AskHit>,
     pub pressed: Option<AskHit>,
+    /// Whether the text field has the keyboard. Focusing it drops the placeholder for a
+    /// caret; the host sets this when the field is clicked (or typed into).
+    pub focused: bool,
+    /// Whether the text field's caret is currently drawn. The host owns the blink — it knows
+    /// its own frame clock — and toggles this; leave it `true` for a steady caret.
+    pub caret_on: bool,
+}
+
+impl Default for AskState {
+    fn default() -> AskState {
+        AskState {
+            hover: None,
+            pressed: None,
+            focused: false,
+            caret_on: true,
+        }
+    }
 }
 
 impl AskState {
@@ -683,6 +729,13 @@ pub fn ask_rects(
                 w: row_w,
                 h,
             }),
+            AskRole::Input => out.push(AskRect {
+                hit: AskHit::Input,
+                x: x0,
+                y,
+                w: row_w,
+                h,
+            }),
             AskRole::Buttons => {
                 for (button, &(dx, bw)) in layout.buttons.iter().zip(&m.buttons) {
                     out.push(AskRect {
@@ -699,6 +752,59 @@ pub fn ask_rects(
         i = j;
     }
     out
+}
+
+/// How far the field's text is scrolled left so the caret stays visible, in pixels. A field
+/// scrolls rather than wrapping, so this is what keeps a long value usable.
+fn input_scroll(view: &InputView, fonts: &AskFonts, inner_w: i32) -> i32 {
+    let full = measure_text(fonts.text, &view.value);
+    if full <= inner_w {
+        return 0;
+    }
+    let upto: String = view.value.chars().take(view.caret).collect();
+    let caret_x = measure_text(fonts.text, &upto);
+    // Keep the caret inside the box, and never scroll past the end of the text.
+    caret_x.saturating_sub(inner_w).max(0).min(full - inner_w)
+}
+
+/// Where the field's text and caret sit inside a field box of width `w` at `x`: the text
+/// origin (already scrolled) and the inner width available to it.
+fn input_text_origin(view: &InputView, fonts: &AskFonts, x: i32, w: i32, scale: f32) -> (i32, i32) {
+    let hpad = (INPUT_HPAD * scale).round().max(1.0) as i32;
+    let inner_w = (w - 2 * hpad).max(1);
+    (x + hpad - input_scroll(view, fonts, inner_w), inner_w)
+}
+
+/// The caret position — as a **char** offset — for a click at `px` inside the text field, or
+/// `None` when the balloon has no field or `px` is outside it. Feed it to
+/// `Agent::report_ask_caret`.
+pub fn ask_caret_at(
+    layout: &AskLayout,
+    fonts: &AskFonts,
+    w: u32,
+    below: bool,
+    scale: f32,
+    px: i32,
+) -> Option<usize> {
+    let view = layout.input.as_ref()?;
+    let field = ask_rects(layout, fonts, w, below, scale)
+        .into_iter()
+        .find(|r| r.hit == AskHit::Input)?;
+    if view.value.is_empty() {
+        return Some(0);
+    }
+    let (text_x, _) = input_text_origin(view, fonts, field.x, field.w, scale);
+    // Walk the chars, taking the boundary nearest the click.
+    let mut best = (0usize, (px - text_x).abs());
+    let mut run = String::new();
+    for (n, c) in view.value.chars().enumerate() {
+        run.push(c);
+        let dist = (px - (text_x + measure_text(fonts.text, &run))).abs();
+        if dist < best.1 {
+            best = (n + 1, dist);
+        }
+    }
+    Some(best.0)
 }
 
 /// Which control — if any — a click at `(px, py)` in the painted buffer landed on. Feed the
@@ -749,6 +855,7 @@ pub fn paint_ask_into(
         buf,
         w: w as i32,
         h: h as i32,
+        clip: None,
     }
     .ask(layout, below, paint, fonts, state, scale);
 }
@@ -758,6 +865,30 @@ struct Canvas<'a> {
     buf: &'a mut [u8],
     w: i32,
     h: i32,
+    /// When set, drawing is confined to this `(x, y, w, h)` rect — the text field uses it so
+    /// a value scrolled past the box edge is cut off rather than spilling into the balloon.
+    clip: Option<(i32, i32, i32, i32)>,
+}
+
+impl Canvas<'_> {
+    /// Whether `(x, y)` is on-canvas and inside the clip rect, if any.
+    #[inline]
+    fn writable(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return false;
+        }
+        match self.clip {
+            Some((cx, cy, cw, ch)) => x >= cx && y >= cy && x < cx + cw && y < cy + ch,
+            None => true,
+        }
+    }
+
+    /// Run `draw` with drawing confined to `rect`, restoring the previous clip after.
+    fn clipped(&mut self, rect: (i32, i32, i32, i32), draw: impl FnOnce(&mut Self)) {
+        let prev = self.clip.replace(rect);
+        draw(self);
+        self.clip = prev;
+    }
 }
 
 /// Coverage (0..=1) of the pixel centered at (`px`, `py`) inside the rounded rectangle
@@ -774,7 +905,7 @@ fn round_rect_cov(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) -> f
 impl Canvas<'_> {
     #[inline]
     fn put(&mut self, x: i32, y: i32, rgb: [u8; 3]) {
-        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+        if !self.writable(x, y) {
             return;
         }
         let o = ((y * self.w + x) * 4) as usize;
@@ -787,7 +918,7 @@ impl Canvas<'_> {
     /// Alpha-blend `rgb` over the pixel at `(x, y)` with coverage `a` (0..=255).
     #[inline]
     fn blend(&mut self, x: i32, y: i32, rgb: [u8; 3], a: u8) {
-        if a == 0 || x < 0 || y < 0 || x >= self.w || y >= self.h {
+        if a == 0 || !self.writable(x, y) {
             return;
         }
         let o = ((y * self.w + x) * 4) as usize;
@@ -803,7 +934,7 @@ impl Canvas<'_> {
     /// which assumes an opaque backdrop — they need real straight-alpha compositing or the
     /// antialiased edge picks up a dark fringe.
     fn cover(&mut self, x: i32, y: i32, rgb: [u8; 3], cov: f32) {
-        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+        if !self.writable(x, y) {
             return;
         }
         let sa = (cov.clamp(0.0, 1.0) * 255.0).round() as u32;
@@ -1040,6 +1171,14 @@ impl Canvas<'_> {
             let metric = &m.rows[i];
             let y = y0 + metric.dy;
 
+            if row.role == AskRole::Input {
+                if let Some(view) = &layout.input {
+                    let row_w = (self.w - 2 * x0).max(1);
+                    self.input_field(x0, y, row_w, metric.h, view, style, fonts, state, scale);
+                }
+                continue;
+            }
+
             if row.role == AskRole::Buttons {
                 for (button, &(dx, bw)) in layout.buttons.iter().zip(&m.buttons) {
                     let phase = state.phase(AskHit::Button(*button));
@@ -1166,6 +1305,77 @@ impl Canvas<'_> {
                     self.thick_line(mx, my, zx, zy, half, paint.accent);
                 }
             }
+        }
+    }
+
+    /// Draw the text field: a white, bordered box holding the value (or a dimmed
+    /// placeholder) and the caret. The value is clipped to the box and scrolled to keep the
+    /// caret in view, so a long answer neither wraps nor spills.
+    #[allow(clippy::too_many_arguments)]
+    fn input_field(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        view: &InputView,
+        paint: &BalloonPaint,
+        fonts: &AskFonts,
+        state: &AskState,
+        scale: f32,
+    ) {
+        let bord = scale.round().max(1.0) as i32;
+        let r = (scale * 3.0).round().max(2.0) as i32;
+        // Focused or hovered, the field wears the accent border; otherwise it sits quiet.
+        let border = if state.focused || state.hover == Some(AskHit::Input) {
+            paint.accent
+        } else {
+            mix(paint.border, paint.accent, 0.35)
+        };
+        self.fill_round_rect(x, y, w, h, r, border);
+        self.fill_round_rect(
+            x + bord,
+            y + bord,
+            w - 2 * bord,
+            h - 2 * bord,
+            (r - bord).max(0),
+            [0xFF, 0xFF, 0xFF],
+        );
+
+        let line_h = fonts.line_h();
+        let ty = y + (h - line_h) / 2;
+        let (text_x, inner_w) = input_text_origin(view, fonts, x, w, scale);
+        let prompting = view.shows_prompt(state.focused);
+        let color = if prompting {
+            // A placeholder is a hint, not content.
+            mix(paint.text, [0xFF, 0xFF, 0xFF], 0.55)
+        } else {
+            paint.text
+        };
+        let text = view.display(state.focused);
+
+        let hpad = (INPUT_HPAD * scale).round().max(1.0) as i32;
+        let inner = (x + hpad, y + bord, inner_w, h - 2 * bord);
+        self.clipped(inner, |c| match fonts.text {
+            Some(f) => c.text_font(f, text_x, ty, text, color),
+            None => c.text_bitmap(text_x, ty, BSCALE, text, color),
+        });
+
+        // The caret belongs to focus, not to content: a focused empty field shows one.
+        if state.caret_on && state.focused {
+            let upto: String = view.value.chars().take(view.caret).collect();
+            let caret_x = text_x + measure_text(fonts.text, &upto);
+            let (top, bottom) = (ty as f32, (ty + line_h) as f32);
+            self.clipped(inner, |c| {
+                c.thick_line(
+                    caret_x as f32,
+                    top,
+                    caret_x as f32,
+                    bottom,
+                    (scale * 0.6).max(0.5),
+                    paint.text,
+                )
+            });
         }
     }
 
@@ -1356,7 +1566,7 @@ mod tests {
 
     /// The demo question: a heading, body text, two choices, a check box and a button row.
     fn ask_layout() -> AskLayout {
-        use crustagent_core::ask::{layout_ask, BalloonUi, ButtonSet};
+        use crustagent_core::ask::{layout_ask, AskAnswer, BalloonUi, ButtonSet};
         layout_ask(
             &BalloonUi::new("Select one of these things:")
                 .heading("What would you like to do?")
@@ -1364,7 +1574,7 @@ mod tests {
                 .choice("Make a chart")
                 .checkbox("Don't ask again")
                 .buttons(ButtonSet::OkCancel),
-            0,
+            &AskAnswer::default(),
             32,
         )
     }
@@ -1445,11 +1655,11 @@ mod tests {
 
     #[test]
     fn a_wrapped_choice_is_one_region_spanning_its_rows() {
-        use crustagent_core::ask::{layout_ask, BalloonUi};
+        use crustagent_core::ask::{layout_ask, AskAnswer, BalloonUi};
         // Narrow enough that the choice wraps over several rows.
         let layout = layout_ask(
             &BalloonUi::new("").choice("one two three four five six"),
-            0,
+            &AskAnswer::default(),
             10,
         );
         assert!(layout.rows.len() > 1);
@@ -1485,6 +1695,8 @@ mod tests {
                     "{:?} must clear the marker column",
                     row.role
                 ),
+                // The field indents by its own padding, not the marker column.
+                AskRole::Input => assert!(metric.text_dx > 0 && metric.text_dx < m.marker_w),
                 AskRole::Heading | AskRole::Text | AskRole::Buttons => {
                     assert_eq!(metric.text_dx, 0, "{:?} is not marked", row.role)
                 }
@@ -1526,7 +1738,7 @@ mod tests {
 
         let hovering = AskState {
             hover: Some(a),
-            pressed: None,
+            ..AskState::default()
         };
         assert_eq!(hovering.phase(a), Phase::Hover);
         assert_eq!(hovering.phase(b), Phase::Idle);
@@ -1534,6 +1746,7 @@ mod tests {
         let holding = AskState {
             hover: Some(a),
             pressed: Some(a),
+            ..AskState::default()
         };
         assert_eq!(holding.phase(a), Phase::Pressed);
 
@@ -1542,6 +1755,7 @@ mod tests {
         let dragged_off = AskState {
             hover: Some(b),
             pressed: Some(a),
+            ..AskState::default()
         };
         assert_eq!(dragged_off.phase(a), Phase::Idle);
         assert_eq!(dragged_off.phase(b), Phase::Idle);
@@ -1574,11 +1788,201 @@ mod tests {
         let idle = render(&AskState::default());
         let hovered = render(&AskState {
             hover: Some(rects[0].hit),
-            pressed: None,
+            ..AskState::default()
         });
         assert_ne!(idle, hovered, "hover should be visible at all");
         // ...and the region map is identical either way.
         assert_eq!(rects, ask_rects(&layout, &fonts, w, false, 2.0));
+    }
+
+    /// A search-style question with a text field, at `text` with the caret at `caret`.
+    fn search_layout(text: &str, caret: usize) -> AskLayout {
+        use crustagent_core::ask::{layout_ask, AskAnswer, BalloonUi, ButtonSet};
+        layout_ask(
+            &BalloonUi::new("What would you like to do?")
+                .input("Type your question here")
+                .buttons(ButtonSet::SearchClose),
+            &AskAnswer {
+                text: text.to_string(),
+                caret,
+                ..Default::default()
+            },
+            32,
+        )
+    }
+
+    #[test]
+    fn the_field_is_hittable_and_sized_from_its_placeholder() {
+        let fonts = AskFonts::new(None);
+        let empty = search_layout("", 0);
+        let (w, _) = ask_size(&fonts, &empty, 2.0);
+        let field = ask_rects(&empty, &fonts, w, false, 2.0)
+            .into_iter()
+            .find(|r| r.hit == AskHit::Input)
+            .expect("the field is clickable");
+        assert!(field.w > 0 && field.h > 0);
+
+        // Typing a value far longer than the box must not widen the balloon: the field
+        // scrolls instead, so it stays put under the typist.
+        let long = search_layout("a question far too long to fit inside the field at once", 0);
+        assert_eq!(
+            ask_size(&fonts, &long, 2.0),
+            (w, ask_size(&fonts, &empty, 2.0).1)
+        );
+    }
+
+    #[test]
+    fn clicking_the_field_maps_x_to_a_caret_offset() {
+        let fonts = AskFonts::new(None);
+        let layout = search_layout("hello", 5);
+        let (w, _) = ask_size(&fonts, &layout, 2.0);
+        let field = ask_rects(&layout, &fonts, w, false, 2.0)
+            .into_iter()
+            .find(|r| r.hit == AskHit::Input)
+            .unwrap();
+
+        let at = |x| ask_caret_at(&layout, &fonts, w, false, 2.0, x).unwrap();
+        // Left of the text lands before the first char; far right lands after the last.
+        assert_eq!(at(field.x), 0);
+        assert_eq!(at(field.x + field.w), 5);
+        // ...and the offsets in between are monotonic.
+        let mut last = 0;
+        for step in 0..12 {
+            let here = at(field.x + step * field.w / 12);
+            assert!(here >= last, "caret offsets must not go backwards");
+            last = here;
+        }
+    }
+
+    #[test]
+    fn focusing_the_field_trades_the_placeholder_for_a_caret() {
+        let fonts = AskFonts::new(None);
+        let layout = search_layout("", 0);
+        let (w, h) = ask_size(&fonts, &layout, 2.0);
+        let render = |state: &AskState| {
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            paint_ask_into(
+                &mut buf,
+                w,
+                h,
+                &layout,
+                false,
+                &BalloonPaint::default(),
+                &fonts,
+                state,
+                2.0,
+            );
+            buf
+        };
+        let unfocused = render(&AskState::default());
+        let focused = render(&AskState {
+            focused: true,
+            ..AskState::default()
+        });
+        assert_ne!(
+            unfocused, focused,
+            "an empty field must look different once focused"
+        );
+
+        // With the caret blinked off, a focused empty field is genuinely blank — proof the
+        // difference above is the placeholder leaving, not just the caret arriving.
+        let blank = render(&AskState {
+            focused: true,
+            caret_on: false,
+            ..AskState::default()
+        });
+        let ink = |buf: &[u8]| {
+            let field = ask_rects(&layout, &fonts, w, false, 2.0)
+                .into_iter()
+                .find(|r| r.hit == AskHit::Input)
+                .unwrap();
+            let mut n = 0;
+            for y in field.y..field.y + field.h {
+                for x in field.x..field.x + field.w {
+                    let o = ((y as u32 * w + x as u32) * 4) as usize;
+                    if buf[o..o + 3] != [0xFF, 0xFF, 0xFF] {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(
+            ink(&blank) < ink(&unfocused),
+            "the placeholder should be gone once focused"
+        );
+    }
+
+    #[test]
+    fn an_empty_field_puts_the_caret_at_the_start_wherever_you_click() {
+        // There is nothing to place a caret *within* — the placeholder is not content.
+        let fonts = AskFonts::new(None);
+        let layout = search_layout("", 0);
+        let (w, _) = ask_size(&fonts, &layout, 2.0);
+        assert_eq!(ask_caret_at(&layout, &fonts, w, false, 2.0, 9999), Some(0));
+    }
+
+    #[test]
+    fn a_balloon_without_a_field_has_no_caret_to_place() {
+        let fonts = AskFonts::new(None);
+        let layout = ask_layout();
+        let (w, _) = ask_size(&fonts, &layout, 2.0);
+        assert_eq!(ask_caret_at(&layout, &fonts, w, false, 2.0, 10), None);
+    }
+
+    #[test]
+    fn a_long_value_scrolls_to_keep_the_caret_in_view() {
+        let fonts = AskFonts::new(None);
+        let text = "a question far too long to fit inside the field at once";
+        let inner = 100;
+
+        let view = |caret| search_layout(text, caret).input.take().unwrap();
+        // With the caret at the start there is nothing to scroll past...
+        assert_eq!(input_scroll(&view(0), &fonts, inner), 0);
+        // ...and at the end the text is pushed left so the caret stays inside.
+        let end = input_scroll(&view(text.chars().count()), &fonts, inner);
+        assert!(end > 0, "should scroll: {end}");
+        assert!(
+            end <= measure_text(fonts.text, text) - inner,
+            "never scrolls past the end of the text"
+        );
+    }
+
+    #[test]
+    fn the_field_clips_a_value_wider_than_its_box() {
+        // The value is drawn scrolled; without clipping it would spill across the balloon.
+        let fonts = AskFonts::new(None);
+        let layout = search_layout(
+            "a question far too long to fit inside the field at once",
+            54,
+        );
+        let (w, h) = ask_size(&fonts, &layout, 2.0);
+        let field = ask_rects(&layout, &fonts, w, false, 2.0)
+            .into_iter()
+            .find(|r| r.hit == AskHit::Input)
+            .unwrap();
+
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        paint_ask_into(
+            &mut buf,
+            w,
+            h,
+            &layout,
+            false,
+            &BalloonPaint::default(),
+            &fonts,
+            &AskState::default(),
+            2.0,
+        );
+        // Every row above the field must be free of the field's white fill — i.e. nothing
+        // leaked out of the box vertically — and the rows are otherwise painted.
+        let px = |x: i32, y: i32| {
+            let o = ((y as u32 * w + x as u32) * 4) as usize;
+            [buf[o], buf[o + 1], buf[o + 2]]
+        };
+        let above = field.y - 2;
+        assert!(above > 0);
+        assert_ne!(px(field.x + 2, above), [0xFF, 0xFF, 0xFF]);
     }
 
     #[test]

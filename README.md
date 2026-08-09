@@ -75,10 +75,12 @@ has `MOVING*` animations, and **teleports** one that doesn't (vanish → jump �
 drives the character's `SPEAKING` animation + mouth), but **`say_over`/`think_over`** show a
 balloon that reveals *over the current animation* without taking a queue slot — so the
 character can talk while it keeps gesturing. **`ask`** puts an *interactive* balloon up —
-clickable choices, check boxes and a commit-button row, modeled on the Office Assistant's
-balloon (Microsoft Agent's own was text-only); the host hit-tests with
-`crustagent-balloon`'s `ask_hit_test` and reports back via `report_ask_hit`, and the answer
-arrives as `Event::Answered`. See [`docs/balloon-ui.md`](docs/balloon-ui.md). Every request
+clickable choices, check boxes, a commit-button row, and optionally a **text field** —
+modeled on the Office Assistant's balloon (Microsoft Agent's own was text-only); the host
+hit-tests with `crustagent-balloon`'s `ask_hit_test` and reports back via `report_ask_hit`,
+and the answer arrives as `Event::Answered`. The field (Office's search box, which its API
+never actually exposed) is edited through `report_ask_text` / `report_ask_edit` and submits
+with `report_ask_submit`. See [`docs/balloon-ui.md`](docs/balloon-ui.md). Every request
 returns a `ReqId`, and `drain_events()` yields an `Event` stream (request start/complete,
 show/hide, idle start/end, balloon show/hide, speech start/word/end, `\Mrk` **bookmarks**,
 answers, plus host-reported clicks/drags) so an app can react to what the character is doing. Speech
@@ -190,8 +192,8 @@ cargo run -p crustagent-render -- assets/agents/ACT/clippit.act Thinking    # ..
 With no animation named, the character **idles** — escalating `IDLINGLEVEL` animations,
 like the assistant standing around. Name one to loop that gesture instead. **Drag** the
 character with the left mouse button; **right-click** for a command menu; **Esc/Q** quits.
-The menu's **Ask** item raises an *interactive* balloon — clickable choices, check boxes and
-buttons, the way the Office Assistant's balloon worked (see
+The menu's **Ask** items raise an *interactive* balloon — clickable choices, check boxes and
+buttons, or a typed search question — the way the Office Assistant's balloon worked (see
 [`docs/balloon-ui.md`](docs/balloon-ui.md)).
 
 The window is a borderless, transparent, always-on-top `wgpu` surface (premultiplied

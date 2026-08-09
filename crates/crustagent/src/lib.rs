@@ -45,8 +45,8 @@ const THINK_PACE_MS: u32 = 300;
 /// The interactive-balloon vocabulary (see [`Agent::ask`]), re-exported so hosts need not
 /// depend on `crustagent-core` directly.
 pub use crustagent_core::ask::{
-    layout_ask, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button, ButtonSet,
-    ChoiceStyle, MAX_ITEMS,
+    layout_ask, AskAnswer, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button,
+    ButtonSet, ChoiceStyle, InputView, RowMarker, TextInput, MAX_ITEMS,
 };
 pub use crustagent_format::{self as format, AcsFile as CharacterFile, Gender, MouthOverlay, Rgba};
 pub use crustagent_tts::{self, default_engine, TimedTts, TtsEngine, VoiceEvent, VoiceRequest};
@@ -93,6 +93,25 @@ pub enum MouseButton {
     Middle,
 }
 
+/// An editing key applied to a balloon's text field via [`Agent::report_ask_edit`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AskEdit {
+    /// Delete the char before the caret.
+    Backspace,
+    /// Delete the char after the caret.
+    Delete,
+    /// Move the caret one char left.
+    Left,
+    /// Move the caret one char right.
+    Right,
+    /// Move the caret to the start.
+    Home,
+    /// Move the caret to the end.
+    End,
+    /// Empty the field.
+    Clear,
+}
+
 /// A speak vs. think balloon (the tail shape differs).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BalloonKind {
@@ -108,7 +127,10 @@ pub enum BalloonKind {
 /// ([`Clicked`](Event::Clicked), [`DragStarted`](Event::DragStarted), …) are ones the host
 /// feeds back in (via [`Agent::report_click`] etc.) so an app can consume a single event
 /// stream.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// `Event` is [`Clone`] but not `Copy`: [`Answered`](Event::Answered) may carry text typed
+/// into a balloon's input field.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Event {
     /// A queued request began.
     RequestStarted(ReqId),
@@ -128,13 +150,16 @@ pub enum Event {
     BalloonHidden,
     /// The user answered a [`Request::Ask`] question. `choice` is the 1-based index of the
     /// clicked choice (as the Office Assistant's `Show` returned), `button` the clicked
-    /// commit button, and `checked` a bitmask of the ticked check boxes (bit *n* = check box
-    /// *n*). Exactly one of `choice` / `button` is set. A question dismissed without an
-    /// answer (see [`Agent::dismiss_ask`]) raises no `Answered` at all.
+    /// commit button, `checked` a bitmask of the ticked check boxes (bit *n* = check box
+    /// *n*), and `text` whatever was typed into the question's input field, if it had one.
+    /// At most one of `choice` / `button` is set — a question submitted from the field with
+    /// no button set has neither. A question dismissed without an answer (see
+    /// [`Agent::dismiss_ask`]) raises no `Answered` at all.
     Answered {
         choice: Option<u8>,
         button: Option<Button>,
         checked: u8,
+        text: Option<String>,
     },
     /// Speech (audio + reveal) began.
     SpeechStarted,
@@ -323,8 +348,8 @@ pub struct Agent {
 
     // interactive question (a balloon with clickable choices / check boxes / buttons)
     ask: Option<BalloonUi>,
-    /// Bitmask of ticked check boxes in the active question.
-    ask_checked: u8,
+    /// Ticked check boxes and typed text for the active question.
+    ask_answer: AskAnswer,
 
     // sound effects
     audio: Box<dyn AudioSink>,
@@ -378,7 +403,7 @@ impl Agent {
             speaking_overlay: false,
             overlay_think: false,
             ask: None,
-            ask_checked: 0,
+            ask_answer: AskAnswer::default(),
             audio: Box::new(NullSink),
             last_track_index: None,
         }
@@ -628,7 +653,88 @@ impl Agent {
     }
     /// Bitmask of the check boxes ticked so far in the active question (bit *n* = box *n*).
     pub fn ask_checked(&self) -> u8 {
-        self.ask_checked
+        self.ask_answer.checked
+    }
+    /// What has been typed into the active question's text field so far.
+    pub fn ask_text(&self) -> &str {
+        &self.ask_answer.text
+    }
+    /// Caret position in [`ask_text`](Agent::ask_text), as a char offset.
+    pub fn ask_caret(&self) -> usize {
+        self.ask_answer.caret_char()
+    }
+    /// Whether the active question has a text field at all.
+    pub fn ask_has_input(&self) -> bool {
+        self.ask.as_ref().is_some_and(|q| q.input.is_some())
+    }
+
+    /// Insert typed text at the caret of the active question's field (the host's key-press
+    /// or paste text). Ignored when there is no question, or it has no field.
+    pub fn report_ask_text(&mut self, text: &str) {
+        if !self.ask_has_input() || text.is_empty() {
+            return;
+        }
+        // Control characters are the host's business (Enter submits, Escape dismisses);
+        // they must never land in the buffer.
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        let at = self.ask_answer.caret_byte();
+        self.ask_answer.text.insert_str(at, &clean);
+        self.ask_answer.caret = self.ask_answer.caret_char() + clean.chars().count();
+    }
+
+    /// Apply an editing key to the active question's field.
+    pub fn report_ask_edit(&mut self, edit: AskEdit) {
+        if !self.ask_has_input() {
+            return;
+        }
+        let caret = self.ask_answer.caret_char();
+        let len = self.ask_answer.text.chars().count();
+        match edit {
+            AskEdit::Backspace if caret > 0 => {
+                self.ask_answer.caret = caret - 1;
+                let at = self.ask_answer.caret_byte();
+                self.ask_answer.text.remove(at);
+            }
+            AskEdit::Delete if caret < len => {
+                let at = self.ask_answer.caret_byte();
+                self.ask_answer.text.remove(at);
+            }
+            AskEdit::Left => self.ask_answer.caret = caret.saturating_sub(1),
+            AskEdit::Right => self.ask_answer.caret = (caret + 1).min(len),
+            AskEdit::Home => self.ask_answer.caret = 0,
+            AskEdit::End => self.ask_answer.caret = len,
+            AskEdit::Clear => {
+                self.ask_answer.text.clear();
+                self.ask_answer.caret = 0;
+            }
+            AskEdit::Backspace | AskEdit::Delete => {}
+        }
+    }
+
+    /// Move the caret to a char offset — what a host reports when the field is clicked
+    /// (`crustagent-balloon`'s `ask_caret_at` turns a pixel position into one). Clamped.
+    pub fn report_ask_caret(&mut self, caret: usize) {
+        if self.ask_has_input() {
+            self.ask_answer.caret = caret.min(self.ask_answer.text.chars().count());
+        }
+    }
+
+    /// Submit the question from its text field — what Enter does. Answers with the field's
+    /// contents and the set's **first** button (Office's search balloon submitted as
+    /// *Search*), or with no button when the question has none. Ignored when the question
+    /// has no field.
+    pub fn report_ask_submit(&mut self) {
+        if !self.ask_has_input() {
+            return;
+        }
+        let button = self
+            .ask
+            .as_ref()
+            .and_then(|q| q.buttons.buttons().first().copied());
+        self.finish_ask(None, button);
     }
     /// Report a click that landed on part of an interactive balloon (hit-tested by the host
     /// against [`BalloonView::ask`] — `crustagent-balloon`'s `ask_hit_test` does this for the
@@ -647,8 +753,11 @@ impl Agent {
             return;
         }
         match hit {
-            AskHit::CheckBox(i) if i < MAX_ITEMS => self.ask_checked ^= 1 << i,
+            AskHit::CheckBox(i) if i < MAX_ITEMS => self.ask_answer.checked ^= 1 << i,
             AskHit::CheckBox(_) => {}
+            // The field is not an answer: clicking it just moves focus/caret there, which
+            // the host follows up with `report_ask_caret`.
+            AskHit::Input => {}
             AskHit::Choice(i) => {
                 let choice = u8::try_from(i + 1).ok();
                 self.finish_ask(choice, None);
@@ -718,7 +827,7 @@ impl Agent {
                                        // Dropping the question is what releases a modal `Ask` activity: `update` advances
                                        // the queue as soon as there is nothing left to wait for.
         self.ask = None;
-        self.ask_checked = 0;
+        self.ask_answer = AskAnswer::default();
         if self.balloon_kind.take().is_some() {
             self.balloon_done = false;
             self.balloon_hold_ms = 0;
@@ -894,8 +1003,8 @@ impl Agent {
         // Replaces any lingering balloon; must run *before* `ask` is set, since clearing a
         // balloon is also what drops a question.
         self.begin_balloon(BalloonKind::Speak, Vec::new(), Vec::new());
+        self.ask_answer = AskAnswer::for_question(&question);
         self.ask = Some(question);
-        self.ask_checked = 0;
         self.balloon_done = true;
         self.balloon_hold_ms = u32::MAX; // never auto-hide a question
         if modal {
@@ -910,12 +1019,18 @@ impl Agent {
 
     /// Answer the active question: raise [`Event::Answered`] and take the balloon down.
     fn finish_ask(&mut self, choice: Option<u8>, button: Option<Button>) {
-        let checked = self.ask_checked;
+        let checked = self.ask_answer.checked;
+        let text = self
+            .ask
+            .as_ref()
+            .and_then(|q| q.input.as_ref())
+            .map(|_| self.ask_answer.text.clone());
         self.clear_balloon(); // drops `ask`, releasing a modal wait
         self.emit(Event::Answered {
             choice,
             button,
             checked,
+            text,
         });
     }
 
@@ -1484,7 +1599,7 @@ impl Agent {
         let kind = self.balloon_kind?;
         if let Some(question) = &self.ask {
             // A question is fully present from the moment it appears — nothing to pace.
-            let ask = layout_ask(question, self.ask_checked, self.style.per_line);
+            let ask = layout_ask(question, &self.ask_answer, self.style.per_line);
             let layout = BalloonLayout {
                 lines: ask.lines(),
                 cols: ask.cols,

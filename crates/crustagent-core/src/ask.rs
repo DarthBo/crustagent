@@ -39,6 +39,9 @@ pub enum Button {
     Next,
     Back,
     Close,
+    /// Submits the balloon's text field. A crustagent extension: Office had the constant
+    /// (`msoBalloonButtonSearch`) but never let a developer put a field beside it.
+    Search,
 }
 
 impl Button {
@@ -52,6 +55,7 @@ impl Button {
             Button::Next => "Next",
             Button::Back => "Back",
             Button::Close => "Close",
+            Button::Search => "Search",
         }
     }
 }
@@ -69,6 +73,8 @@ pub enum ButtonSet {
     YesNoCancel,
     NextClose,
     BackNextClose,
+    /// Search + Close, for a balloon with a text field (see [`TextInput`]).
+    SearchClose,
 }
 
 impl ButtonSet {
@@ -83,6 +89,7 @@ impl ButtonSet {
             ButtonSet::YesNoCancel => &[Button::Yes, Button::No, Button::Cancel],
             ButtonSet::NextClose => &[Button::Next, Button::Close],
             ButtonSet::BackNextClose => &[Button::Back, Button::Next, Button::Close],
+            ButtonSet::SearchClose => &[Button::Search, Button::Close],
         }
     }
 }
@@ -102,6 +109,21 @@ pub enum BalloonMode {
     AutoDown,
 }
 
+/// A single-line text field in the balloon, for a question whose answer is typed rather
+/// than picked — the Assistant's "What would you like to do?" search box.
+///
+/// **This is a crustagent extension, not an Office feature.** The `Balloon` object had no
+/// text-input member at all; the search box in Office's screenshots belongs to MSO's own
+/// built-in help balloon, driven by `Assistant.Help` and the `AnswerWizard`, which
+/// `Assistant.NewBalloon` could never reproduce. See `docs/balloon-ui.md` §5.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextInput {
+    /// Dimmed prompt shown while the field is empty.
+    pub placeholder: String,
+    /// Text the field starts out holding.
+    pub initial: String,
+}
+
 /// A question to put in the balloon: an optional heading, body text, up to
 /// [`MAX_ITEMS`] clickable choices, up to [`MAX_ITEMS`] check boxes, and a commit-button row.
 ///
@@ -110,13 +132,13 @@ pub enum BalloonMode {
 /// `CheckBoxes`.
 ///
 /// ```
-/// use crustagent_core::ask::{layout_ask, BalloonUi, ButtonSet};
+/// use crustagent_core::ask::{layout_ask, AskAnswer, BalloonUi, ButtonSet};
 /// let ui = BalloonUi::new("What would you like to do?")
 ///     .heading("Getting started")
 ///     .choice("Write a letter")
 ///     .choice("Make a chart")
 ///     .buttons(ButtonSet::OkCancel);
-/// let laid_out = layout_ask(&ui, 0, 32);
+/// let laid_out = layout_ask(&ui, &AskAnswer::default(), 32);
 /// assert_eq!(laid_out.buttons.len(), 2);
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -129,6 +151,8 @@ pub struct BalloonUi {
     pub choices: Vec<String>,
     /// Toggles that wait for a commit button (Office `CheckBoxes`). Capped at [`MAX_ITEMS`].
     pub checkboxes: Vec<String>,
+    /// An optional text field, below the choices and above the buttons.
+    pub input: Option<TextInput>,
     /// The commit-button row.
     pub buttons: ButtonSet,
     /// How the choices render.
@@ -164,6 +188,26 @@ impl BalloonUi {
         }
         self
     }
+    /// Add a text field with `placeholder` shown while it is empty.
+    pub fn input(mut self, placeholder: impl Into<String>) -> BalloonUi {
+        self.input = Some(TextInput {
+            placeholder: placeholder.into(),
+            initial: String::new(),
+        });
+        self
+    }
+    /// Add a text field pre-filled with `initial`.
+    pub fn input_with(
+        mut self,
+        placeholder: impl Into<String>,
+        initial: impl Into<String>,
+    ) -> BalloonUi {
+        self.input = Some(TextInput {
+            placeholder: placeholder.into(),
+            initial: initial.into(),
+        });
+        self
+    }
     /// Set the commit-button row.
     pub fn buttons(mut self, buttons: ButtonSet) -> BalloonUi {
         self.buttons = buttons;
@@ -193,6 +237,8 @@ pub enum AskRole {
     Choice(usize),
     /// Part of check box `n` (0-based).
     CheckBox(usize),
+    /// The text field.
+    Input,
     /// The commit-button row — one row holding every button in the set.
     Buttons,
 }
@@ -202,7 +248,7 @@ impl AskRole {
     pub fn is_interactive(self) -> bool {
         matches!(
             self,
-            AskRole::Choice(_) | AskRole::CheckBox(_) | AskRole::Buttons
+            AskRole::Choice(_) | AskRole::CheckBox(_) | AskRole::Input | AskRole::Buttons
         )
     }
 }
@@ -259,6 +305,86 @@ impl AskRow {
     }
 }
 
+/// The live state of a question being answered: which boxes are ticked, and what has been
+/// typed into its text field. The agent owns one of these per question; a renderer reads it
+/// through [`layout_ask`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AskAnswer {
+    /// Bitmask of ticked check boxes (bit *n* = box *n*).
+    pub checked: u8,
+    /// The text field's contents.
+    pub text: String,
+    /// Caret position in `text`, as a **char** offset (clamped on use, so it can never split
+    /// a multi-byte character).
+    pub caret: usize,
+}
+
+impl AskAnswer {
+    /// A fresh answer, with the field pre-filled from `ui` and the caret at the end.
+    pub fn for_question(ui: &BalloonUi) -> AskAnswer {
+        let text = ui
+            .input
+            .as_ref()
+            .map(|i| i.initial.clone())
+            .unwrap_or_default();
+        AskAnswer {
+            checked: 0,
+            caret: text.chars().count(),
+            text,
+        }
+    }
+    /// An answer with only check boxes ticked — the common case in tests.
+    pub fn checked(mask: u8) -> AskAnswer {
+        AskAnswer {
+            checked: mask,
+            ..Default::default()
+        }
+    }
+    /// The caret, clamped into `text`.
+    pub fn caret_char(&self) -> usize {
+        self.caret.min(self.text.chars().count())
+    }
+    /// Byte index of the caret, for slicing `text`.
+    pub fn caret_byte(&self) -> usize {
+        self.text
+            .char_indices()
+            .nth(self.caret_char())
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len())
+    }
+}
+
+/// How the text field should be drawn, when the question has one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InputView {
+    /// The typed value — empty until something is entered.
+    pub value: String,
+    /// The placeholder, shown *only* while the field is empty **and** unfocused. A renderer
+    /// also sizes the field from this rather than from `value`, so the box doesn't resize as
+    /// the value is typed — the field scrolls instead.
+    pub prompt: String,
+    /// Caret position as a char offset into `value`.
+    pub caret: usize,
+    /// Index into [`AskLayout::rows`] of the [`AskRole::Input`] row.
+    pub row: usize,
+}
+
+impl InputView {
+    /// Whether the placeholder is what should be drawn. Focusing the field trades the hint
+    /// for a caret: once the pointer has put you in the field, the prompt has done its job.
+    pub fn shows_prompt(&self, focused: bool) -> bool {
+        self.value.is_empty() && !focused
+    }
+    /// The text to draw for the given focus state.
+    pub fn display(&self, focused: bool) -> &str {
+        if self.shows_prompt(focused) {
+            &self.prompt
+        } else {
+            &self.value
+        }
+    }
+}
+
 /// A question laid out into rows, ready for a renderer to draw and hit-test.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AskLayout {
@@ -268,6 +394,8 @@ pub struct AskLayout {
     pub cols: usize,
     /// The buttons in the [`AskRole::Buttons`] row, left to right (empty if there is none).
     pub buttons: Vec<Button>,
+    /// The text field's contents and caret, when the question has one.
+    pub input: Option<InputView>,
     /// How the choices render, so the renderer knows whether to frame them.
     pub style: ChoiceStyle,
 }
@@ -291,6 +419,8 @@ pub enum AskHit {
     Choice(usize),
     /// Check box `n` (0-based) — toggles.
     CheckBox(usize),
+    /// The text field — clicking it places the caret rather than answering.
+    Input,
     /// A commit button.
     Button(Button),
 }
@@ -337,11 +467,13 @@ fn push_wrapped(
     }
 }
 
-/// Lay a question out into rows at `per_line` characters wide, rendering check boxes with
-/// their state from the `checked` bitmask (bit `n` = check box `n`).
+/// Lay a question out into rows at `per_line` characters wide, drawing check-box state and
+/// the text field's contents from `answer`.
 ///
-/// Row order matches Office's balloon: heading, text, choices, check boxes, button row.
-pub fn layout_ask(ui: &BalloonUi, checked: u8, per_line: usize) -> AskLayout {
+/// Row order follows Office's balloon — heading, text, choices, check boxes, button row —
+/// with the text field (a crustagent addition) sitting between the check boxes and the
+/// buttons, where the Assistant's own search box sat.
+pub fn layout_ask(ui: &BalloonUi, answer: &AskAnswer, per_line: usize) -> AskLayout {
     // Below ~8 columns a prefixed row has no room for text at all.
     let per_line = per_line.max(8);
     let mut rows: Vec<AskRow> = Vec::new();
@@ -369,9 +501,28 @@ pub fn layout_ask(ui: &BalloonUi, checked: u8, per_line: usize) -> AskLayout {
         push_wrapped(&mut rows, label, marker, AskRole::Choice(i), per_line);
     }
     for (i, label) in ui.checkboxes.iter().take(MAX_ITEMS).enumerate() {
-        let marker = RowMarker::CheckBox(checked & (1 << i) != 0);
+        let marker = RowMarker::CheckBox(answer.checked & (1 << i) != 0);
         push_wrapped(&mut rows, label, marker, AskRole::CheckBox(i), per_line);
     }
+
+    // The text field is one row whatever its contents: it scrolls horizontally rather than
+    // wrapping, so the balloon doesn't resize itself out from under the typist.
+    let input = ui.input.as_ref().map(|field| {
+        let view = InputView {
+            value: answer.text.clone(),
+            prompt: field.placeholder.clone(),
+            caret: answer.caret_char(),
+            row: rows.len(),
+        };
+        rows.push(AskRow {
+            // The ASCII fallback has no focus to speak of, so it shows the unfocused text.
+            text: view.display(false).to_string(),
+            role: AskRole::Input,
+            marker: RowMarker::None,
+            indent: 0,
+        });
+        view
+    });
 
     let buttons = ui.buttons.buttons().to_vec();
     if !buttons.is_empty() {
@@ -398,6 +549,7 @@ pub fn layout_ask(ui: &BalloonUi, checked: u8, per_line: usize) -> AskLayout {
         rows,
         cols,
         buttons,
+        input,
         style: ui.style,
     }
 }
@@ -414,7 +566,7 @@ mod tests {
             .choice("Landscape")
             .checkbox("Remember this")
             .buttons(ButtonSet::OkCancel);
-        let l = layout_ask(&ui, 0, 40);
+        let l = layout_ask(&ui, &AskAnswer::default(), 40);
         let roles: Vec<AskRole> = l.rows.iter().map(|r| r.role).collect();
         assert_eq!(
             roles,
@@ -436,7 +588,7 @@ mod tests {
             .choice("First")
             .choice("Second")
             .style(ChoiceStyle::Numbers);
-        let l = layout_ask(&ui, 0, 40);
+        let l = layout_ask(&ui, &AskAnswer::default(), 40);
         // The label carries no marker — a renderer draws one from `marker`...
         assert_eq!(l.rows[0].text, "First");
         assert_eq!(l.rows[0].marker, RowMarker::Number(1));
@@ -448,7 +600,7 @@ mod tests {
     #[test]
     fn checkbox_state_comes_from_the_mask() {
         let ui = BalloonUi::new("").checkbox("A").checkbox("B");
-        let l = layout_ask(&ui, 0b10, 40);
+        let l = layout_ask(&ui, &AskAnswer::checked(0b10), 40);
         assert_eq!(l.rows[0].marker, RowMarker::CheckBox(false));
         assert_eq!(l.rows[1].marker, RowMarker::CheckBox(true));
         assert_eq!(l.lines(), vec!["[ ] A", "[x] B"]);
@@ -460,7 +612,7 @@ mod tests {
             &BalloonUi::new("")
                 .choice("one two three four five six")
                 .style(ChoiceStyle::Numbers),
-            0,
+            &AskAnswer::default(),
             12,
         );
         assert!(l.rows.len() > 1, "should wrap: {:?}", l.rows);
@@ -488,21 +640,114 @@ mod tests {
             choices: (0..9).map(|i| format!("c{i}")).collect(),
             ..Default::default()
         };
-        let l = layout_ask(&over, 0, 40);
+        let l = layout_ask(&over, &AskAnswer::default(), 40);
         assert_eq!(l.rows.len(), MAX_ITEMS);
+    }
+
+    #[test]
+    fn the_text_field_sits_between_the_check_boxes_and_the_buttons() {
+        let ui = BalloonUi::new("What would you like to do?")
+            .choice("Print")
+            .checkbox("Search help too")
+            .input("Type your question here")
+            .buttons(ButtonSet::SearchClose);
+        let l = layout_ask(&ui, &AskAnswer::default(), 40);
+        let roles: Vec<AskRole> = l.rows.iter().map(|r| r.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                AskRole::Text,
+                AskRole::Choice(0),
+                AskRole::CheckBox(0),
+                AskRole::Input,
+                AskRole::Buttons,
+            ]
+        );
+        assert_eq!(l.buttons, vec![Button::Search, Button::Close]);
+    }
+
+    #[test]
+    fn the_placeholder_shows_until_the_field_is_focused_or_filled() {
+        let ui = BalloonUi::new("").input("Type your question here");
+        let view = layout_ask(&ui, &AskAnswer::default(), 40).input.unwrap();
+
+        // Empty and unfocused: the hint is doing its job.
+        assert!(view.shows_prompt(false));
+        assert_eq!(view.display(false), "Type your question here");
+        // Focused: the hint gives way, so a caret has somewhere to sit.
+        assert!(!view.shows_prompt(true));
+        assert_eq!(view.display(true), "");
+
+        let typed = AskAnswer {
+            text: "mail merge".into(),
+            caret: 4,
+            ..Default::default()
+        };
+        let view = layout_ask(&ui, &typed, 40).input.unwrap();
+        // With a value there is no hint either way.
+        assert!(!view.shows_prompt(false) && !view.shows_prompt(true));
+        assert_eq!(view.display(false), "mail merge");
+        assert_eq!(view.value, "mail merge");
+        assert_eq!(view.caret, 4);
+    }
+
+    #[test]
+    fn a_prefilled_field_starts_with_the_caret_at_the_end() {
+        let ui = BalloonUi::new("").input_with("Search", "Resume");
+        let answer = AskAnswer::for_question(&ui);
+        assert_eq!(answer.text, "Resume");
+        assert_eq!(answer.caret, 6);
+        assert_eq!(answer.caret_byte(), 6);
+    }
+
+    #[test]
+    fn the_caret_never_splits_a_multibyte_char() {
+        // Four chars, seven bytes — a byte-indexed caret would slice mid-character.
+        let answer = AskAnswer {
+            text: "héllo".into(),
+            caret: 2,
+            ..Default::default()
+        };
+        assert_eq!(answer.caret_byte(), 3);
+        assert!(answer.text.is_char_boundary(answer.caret_byte()));
+
+        // Past the end, it clamps rather than panicking.
+        let past = AskAnswer {
+            text: "hé".into(),
+            caret: 99,
+            ..Default::default()
+        };
+        assert_eq!(past.caret_char(), 2);
+        assert_eq!(past.caret_byte(), past.text.len());
+    }
+
+    #[test]
+    fn a_long_value_stays_on_one_row() {
+        // The field scrolls rather than wrapping, so the balloon doesn't grow as you type.
+        let ui = BalloonUi::new("").input("Search");
+        let answer = AskAnswer {
+            text: "a very long question that would wrap over several lines if it could".into(),
+            caret: 0,
+            ..Default::default()
+        };
+        let l = layout_ask(&ui, &answer, 16);
+        assert_eq!(
+            l.rows.iter().filter(|r| r.role == AskRole::Input).count(),
+            1
+        );
     }
 
     #[test]
     fn no_buttons_means_no_button_row() {
         let ui = BalloonUi::new("Hi").choice("Yes");
-        let l = layout_ask(&ui, 0, 40);
+        let l = layout_ask(&ui, &AskAnswer::default(), 40);
         assert!(l.buttons.is_empty());
         assert!(!l.rows.iter().any(|r| r.role == AskRole::Buttons));
     }
 
     #[test]
     fn empty_question_lays_out_to_nothing() {
-        let l = layout_ask(&BalloonUi::default(), 0, 40);
+        let l = layout_ask(&BalloonUi::default(), &AskAnswer::default(), 40);
         assert!(l.rows.is_empty());
         assert_eq!(l.cols, 0);
     }

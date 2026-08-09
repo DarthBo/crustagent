@@ -45,8 +45,8 @@ pub mod sequence;
 pub mod text;
 
 pub use ask::{
-    layout_ask, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button, ButtonSet,
-    ChoiceStyle, RowMarker, MAX_ITEMS,
+    layout_ask, AskAnswer, AskHit, AskLayout, AskRole, AskRow, BalloonMode, BalloonUi, Button,
+    ButtonSet, ChoiceStyle, InputView, RowMarker, TextInput, MAX_ITEMS,
 };
 pub use balloon::{wrap_last_rows, wrap_words, BalloonLayout};
 pub use character::Character;
