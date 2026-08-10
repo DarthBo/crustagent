@@ -529,7 +529,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crustagent"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "crustagent-core",
  "crustagent-format",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "crustagent-audio"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "crustagent",
  "rodio",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "crustagent-balloon"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "crustagent-core",
  "font8x8",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "crustagent-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "crustagent-format",
  "crustagent-gif",
@@ -565,18 +565,18 @@ dependencies = [
 
 [[package]]
 name = "crustagent-format"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "cfb",
 ]
 
 [[package]]
 name = "crustagent-gif"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "crustagent-render"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "arboard",
  "crustagent",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "crustagent-tts"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "crustagent-format",
  "tts",
