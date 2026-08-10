@@ -482,6 +482,24 @@ the selection it was typed over, so the next keystroke can replace it again.
 `ask_can_undo()` / `ask_can_redo()` are there for a host that wants to grey out a menu item.
 `crustagent-render` binds Cmd/Ctrl+Z, with Shift (or Ctrl+Y) for redo.
 
+### 5.2.3 Platform notes
+
+The field is the only part of this work that touches the platform, and it does so only in the
+**host**: `crustagent-core` and `crustagent` are pure Rust, and `crustagent-balloon` reaches the
+system solely through `fontdb`'s font enumeration.
+
+- **Accelerators** are `Cmd` on macOS and `Ctrl` elsewhere; word-wise movement is `Alt` on macOS and
+  `Ctrl` elsewhere. Accelerator *letters* are matched on the **logical** key, not the physical one —
+  `KeyCode::KeyZ` is whatever sits where QWERTY's Z does, which is the key labelled `W` on AZERTY
+  and `;` on Dvorak. Named keys (arrows, Home/End, Backspace, Enter, Escape) stay physical, since
+  their position is layout-invariant.
+- **Clipboard** is `arboard`, which covers Windows, macOS, and Linux under both X11 and Wayland.
+- **Wayland cannot be given focus programmatically** — `Window::focus_window` is documented
+  unsupported there. So a question with a field opens unfocused on Wayland and needs one click before
+  it takes typing. It degrades rather than breaks, since clicking focuses it anyway.
+- **IME** is not handled: dead keys work (they arrive as composed `text`), but there is no inline
+  pre-edit display.
+
 ### 5.3 Rendering
 
 The field draws as a white, bordered, rounded box. **Focus is real state**, on

@@ -34,7 +34,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
@@ -572,20 +572,38 @@ impl ApplicationHandler for App {
                 } else {
                     self.modifiers.control_key()
                 };
+                // Accelerator letters come from the **logical** key, not the physical one:
+                // `KeyCode::KeyZ` is whatever sits where QWERTY's Z does, which is the key
+                // labelled W on AZERTY and `;` on Dvorak. Cmd+Z has to be the key labelled Z.
+                if accel {
+                    let letter = match event.logical_key.as_ref() {
+                        Key::Character(c) => c.chars().next().map(|c| c.to_ascii_lowercase()),
+                        _ => None,
+                    };
+                    match letter {
+                        Some('a') => self.agent.report_ask_edit(AskEdit::SelectAll),
+                        Some('c') => self.copy_field(false),
+                        Some('x') => self.copy_field(true),
+                        Some('v') => self.paste_field(),
+                        // Cmd/Ctrl+Z undoes; Shift makes it redo, as does Ctrl+Y on Windows.
+                        Some('z') => self.agent.report_ask_edit(if shift {
+                            AskEdit::Redo
+                        } else {
+                            AskEdit::Undo
+                        }),
+                        Some('y') => self.agent.report_ask_edit(AskEdit::Redo),
+                        _ => {}
+                    }
+                    if letter.is_some() {
+                        self.focus_field(true);
+                        if let Some(win) = &self.balloon_window {
+                            win.request_redraw();
+                        }
+                        return;
+                    }
+                }
+                // Named keys stay physical — their position is the same on every layout.
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::KeyA) if accel => {
-                        self.agent.report_ask_edit(AskEdit::SelectAll)
-                    }
-                    PhysicalKey::Code(KeyCode::KeyC) if accel => self.copy_field(false),
-                    PhysicalKey::Code(KeyCode::KeyX) if accel => self.copy_field(true),
-                    PhysicalKey::Code(KeyCode::KeyV) if accel => self.paste_field(),
-                    // Cmd/Ctrl+Z undoes; Shift makes it a redo, as does Ctrl+Y on Windows.
-                    PhysicalKey::Code(KeyCode::KeyZ) if accel => self
-                        .agent
-                        .report_ask_edit(if shift { AskEdit::Redo } else { AskEdit::Undo }),
-                    PhysicalKey::Code(KeyCode::KeyY) if accel => {
-                        self.agent.report_ask_edit(AskEdit::Redo)
-                    }
                     PhysicalKey::Code(KeyCode::Escape) => self.agent.dismiss_ask(),
                     PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
                         self.agent.report_ask_submit()
